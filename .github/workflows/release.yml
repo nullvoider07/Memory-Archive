@@ -1,0 +1,543 @@
+# .github/workflows/release.yml
+#
+# Memory Archive — Release Pipeline
+# Author: Kartik (NullVoider)
+#
+# Triggered by pushing a semver tag (e.g. v0.10.0).
+# Builds five platform archives + one GitHub Release.
+#
+# Job graph:
+#
+#   build-wheel ──┬──► build (x86_64-linux)    ──┐
+#                 ├──► build (aarch64-linux)   ──┤
+#                 ├──► build (x86_64-macos)    ──┼──► release
+#                 ├──► build (aarch64-macos)   ──┤
+#                 └──► build (x86_64-windows)  ──┘
+#
+# The Python wheel is pure-Python so it is built once on Linux x64
+# and reused in all five platform archives.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+
+# Default to read-only; the release job overrides to write.
+permissions:
+  contents: read
+
+# FIX 3 — opt into Node.js 24 for all JavaScript actions in this workflow.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# =============================================================================
+# JOB 1 — Build the Python wheel (once, reused in all platforms)
+# =============================================================================
+jobs:
+  build-wheel:
+    name: Build Python wheel
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Cache pip build deps
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-wheel-${{ hashFiles('ma-app/pyproject.toml') }}
+          restore-keys: pip-wheel-
+
+      - name: Build wheel
+        run: |
+          pip install --quiet build
+          python -m build --wheel ma-app/
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel
+          path: ma-app/dist/*.whl
+          if-no-files-found: error
+          retention-days: 1
+
+# =============================================================================
+# JOB 2 — Build matrix (one job per platform)
+# =============================================================================
+  build:
+    name: Build ${{ matrix.artifact-name }}
+    needs: build-wheel
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            artifact-name: ma-linux-x64
+            archive-format: tar.gz
+            cross: false
+
+          # cmake is installed inside the Docker container by Cross.toml
+          # pre-build, NOT on the host runner. OpenSSL cross-linking is
+          # handled by the ghcr.io/cross-rs/aarch64-unknown-linux-gnu image.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04
+            artifact-name: ma-linux-arm64
+            archive-format: tar.gz
+            cross: true
+
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            artifact-name: ma-macos-x64
+            archive-format: tar.gz
+            cross: false
+
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact-name: ma-macos-arm64
+            archive-format: tar.gz
+            cross: false
+
+          # cmake is pre-installed on windows-2022 via Visual Studio 2022.
+          # rdkafka's cmake-build feature uses MSVC's cl.exe automatically.
+          # OpenSSL is configured by the dedicated step below (FIX 2).
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            artifact-name: ma-windows-x64
+            archive-format: zip
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Rust toolchain
+      # 'stable' instead of the previous pinned '1.85'.
+      # Reason: aws-sdk-s3 and related crates in Cargo.lock now require
+      # rustc ≥ 1.91.1. See changelog at the top of this file.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 'stable'
+          targets: ${{ matrix.target }}
+
+      # protoc (all platforms)
+      # ma-proto/build.rs calls tonic_build::compile_protos() at compile time.
+      # src/gen/control_center.rs is gitignored and must be re-generated from
+      # scratch on every clean checkout.
+      - name: Install protoc (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-${{ runner.os == 'macOS' && 'osx-x86_64' || 'linux-x86_64' }}.zip -o /tmp/protoc.zip
+          unzip -o /tmp/protoc.zip -d /usr/local bin/protoc
+          chmod +x /usr/local/bin/protoc
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-win64.zip -OutFile "$env:TEMP\protoc.zip"
+          Expand-Archive -Path "$env:TEMP\protoc.zip" -DestinationPath "$env:TEMP\protoc" -Force
+          Copy-Item "$env:TEMP\protoc\bin\protoc.exe" "C:\Windows\System32\protoc.exe"
+
+      # Configure OpenSSL (macOS)
+      # macOS ships LibreSSL which does not include static libs. openssl-sys
+      # requires Homebrew's OpenSSL. We export OPENSSL_DIR so the build script
+      # finds the headers and OPENSSL_STATIC=1 so it links the static lib,
+      # avoiding a runtime dep on the Homebrew dylib.
+      - name: Configure OpenSSL (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install openssl@3
+          OPENSSL_PREFIX=$(brew --prefix openssl@3)
+          echo "OPENSSL_DIR=$OPENSSL_PREFIX"                 >> "$GITHUB_ENV"
+          echo "OPENSSL_LIB_DIR=$OPENSSL_PREFIX/lib"         >> "$GITHUB_ENV"
+          echo "OPENSSL_INCLUDE_DIR=$OPENSSL_PREFIX/include" >> "$GITHUB_ENV"
+
+      # cmake + OpenSSL headers (Linux native only)
+      # rdkafka features = ["cmake-build", "ssl"] need cmake + libssl-dev on
+      # native Linux. Skipped for arm64 cross-compile (handled in Docker).
+      - name: Install cmake + OpenSSL (Linux native)
+        if: runner.os == 'Linux' && !matrix.cross
+        run: sudo apt-get install -y cmake libssl-dev pkg-config libcurl4-openssl-dev
+
+      # Configure OpenSSL (Windows)
+      # rdkafka's `ssl` feature depends on openssl-sys. On Windows, openssl-sys
+      # cannot auto-discover the OpenSSL install path — it checks vcpkg (which
+      # is not configured on CI runners) and gives up.
+      #
+      # OpenSSL is pre-installed on windows-2022 GitHub runners. This step
+      # locates it and exports OPENSSL_DIR so the openssl-sys build script
+      # finds the headers and libs. OPENSSL_STATIC=1 links statically,
+      # removing the runtime DLL dependency from the shipped binary.
+      #
+      # If neither expected path exists, choco installs OpenSSL first.
+      - name: Configure OpenSSL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "C:\Program Files\OpenSSL-Win64",
+            "C:\Program Files\OpenSSL"
+          )
+          $opensslDir = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if (-not $opensslDir) {
+            Write-Host "OpenSSL not found at known paths — installing via choco"
+            choco install openssl --no-progress --yes
+            $opensslDir = "C:\Program Files\OpenSSL-Win64"
+          }
+
+          # MSVC static libs live under lib\VC\x64\MD (dynamic CRT, matching
+          # Rust's default MSVC release profile). The top-level lib\ only
+          # contains import libs that point at DLLs; openssl-sys rejects these
+          # when OPENSSL_STATIC=1 is set.
+          $opensslLibDir = "$opensslDir\lib\VC\x64\MD"
+
+          Write-Host "OPENSSL_DIR     = $opensslDir"
+          Write-Host "OPENSSL_LIB_DIR = $opensslLibDir"
+          echo "OPENSSL_DIR=$opensslDir"        >> $env:GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=$opensslLibDir" >> $env:GITHUB_ENV
+          echo "OPENSSL_STATIC=1"               >> $env:GITHUB_ENV
+
+      # Rust dependency cache
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-reg-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-reg-${{ runner.os }}-${{ matrix.target }}-
+
+      - name: Cache Cargo build output
+        uses: actions/cache@v4
+        with:
+          path: target/
+          key: cargo-target-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-target-${{ runner.os }}-${{ matrix.target }}-
+
+      # Install `cross` (arm64 Linux only)
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      # Build Rust binaries
+      - name: Cargo build (native)
+        if: '!matrix.cross'
+        run: >
+          cargo build --release
+          -p ma-core
+          -p ma-kafka-producer
+          --target ${{ matrix.target }}
+
+      - name: Cross build (aarch64-linux)
+        if: matrix.cross
+        run: >
+          cross build --release
+          -p ma-core
+          -p ma-kafka-producer
+          --target ${{ matrix.target }}
+
+      # Strip binaries
+      - name: Strip binaries (Linux native x64)
+        if: runner.os == 'Linux' && !matrix.cross
+        run: |
+          strip target/${{ matrix.target }}/release/ma-core
+          strip target/${{ matrix.target }}/release/ma-kafka-producer
+
+      - name: Strip binaries (Linux arm64 cross)
+        if: matrix.cross
+        run: |
+          sudo apt-get install -y binutils-aarch64-linux-gnu
+          aarch64-linux-gnu-strip target/${{ matrix.target }}/release/ma-core
+          aarch64-linux-gnu-strip target/${{ matrix.target }}/release/ma-kafka-producer
+
+      - name: Strip and ad-hoc sign binaries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          strip target/${{ matrix.target }}/release/ma-core
+          strip target/${{ matrix.target }}/release/ma-kafka-producer
+          # Ad-hoc signing prevents the "binary is damaged" Gatekeeper error.
+          codesign --force --deep --sign - \
+            target/${{ matrix.target }}/release/ma-core
+          codesign --force --deep --sign - \
+            target/${{ matrix.target }}/release/ma-kafka-producer
+
+      # Download the pre-built Python wheel
+      - name: Download Python wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: python-wheel
+          path: wheel/
+
+      # Generate platform-specific INSTALL.md
+
+      - name: Generate INSTALL.md (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cat > INSTALL.md << 'INSTALL_EOF'
+          # Memory Archive — Installation (Linux)
+
+          ## Prerequisites
+          - Linux x86_64 or arm64 (kernel ≥ 5.4 recommended)
+          - Python 3.13 or later
+          - Redis 7+ running locally or accessible on the network
+          - Kafka 3+ (required only by ma-kafka-producer)
+
+          ## Steps
+
+          ### 1. Extract the archive
+          ```bash
+          tar -xzf ${{ matrix.artifact-name }}.tar.gz -C /opt/memory-archive
+          cd /opt/memory-archive
+          ```
+
+          ### 2. Install ma-app (offline, no internet required)
+          ```bash
+          pip install memory_archive-*.whl
+          ```
+
+          ### 3. Make binaries executable (if needed)
+          ```bash
+          chmod +x ma-core ma-kafka-producer
+          ```
+
+          ### 4. Run ma-core
+          ```bash
+          ./ma-core
+          # Or set a custom config path:
+          # MEMORY_ARCHIVE_CONFIG=/path/to/config.json ./ma-core
+          ```
+
+          ### 5. Run the TUI annotator
+          ```bash
+          memory-archive annotate <session-id>
+          ```
+
+          ### 6. Run ma-kafka-producer (optional — dev tool only)
+          ```bash
+          ./ma-kafka-producer
+          ```
+
+          ## Configuration
+          ma-core looks for `~/.memory-archive/config.json` by default.
+          Override with the `MEMORY_ARCHIVE_CONFIG` environment variable.
+
+          ## License
+          Apache License 2.0 — see LICENSE.
+          INSTALL_EOF
+
+      - name: Generate INSTALL.md (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cat > INSTALL.md << 'INSTALL_EOF'
+          # Memory Archive — Installation (macOS)
+
+          ## Prerequisites
+          - macOS 12 Monterey or later (${{ matrix.target }})
+          - Python 3.13+  →  `brew install python@3.13`
+          - Redis 7+       →  `brew install redis && brew services start redis`
+          - Kafka 3+ (required only by ma-kafka-producer)
+
+          ## Steps
+
+          ### 1. Extract the archive
+          ```bash
+          tar -xzf ${{ matrix.artifact-name }}.tar.gz -C ~/Applications/memory-archive
+          cd ~/Applications/memory-archive
+          ```
+
+          ### 2. Install ma-app (offline, no internet required)
+          ```bash
+          pip3 install memory_archive-*.whl
+          ```
+
+          ### 3. Clear Gatekeeper quarantine (first run only)
+          The binaries are ad-hoc signed. macOS may still quarantine them
+          when downloaded from the internet:
+          ```bash
+          xattr -d com.apple.quarantine ma-core ma-kafka-producer
+          ```
+          Alternatively: right-click each binary → Open → Open.
+
+          ### 4. Run ma-core
+          ```bash
+          ./ma-core
+          # Or with a custom config:
+          # MEMORY_ARCHIVE_CONFIG=/path/to/config.json ./ma-core
+          ```
+
+          ### 5. Run the TUI annotator
+          ```bash
+          memory-archive annotate <session-id>
+          ```
+
+          ## Configuration
+          ma-core looks for `~/.memory-archive/config.json` by default.
+          Override with the `MEMORY_ARCHIVE_CONFIG` environment variable.
+
+          ## License
+          Apache License 2.0 — see LICENSE.
+          INSTALL_EOF
+
+      - name: Generate INSTALL.md (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          @'
+          # Memory Archive — Installation (Windows)
+
+          ## Prerequisites
+          - Windows 10 21H2 or later (x86_64)
+          - Python 3.13+  →  https://www.python.org/downloads/
+          - Redis via WSL2 or Memurai (required by ma-core at runtime)
+          - Kafka 3+ (required only by ma-kafka-producer)
+
+          ## Steps
+
+          ### 1. Extract the archive
+          ```powershell
+          Expand-Archive -Path ${{ matrix.artifact-name }}.zip -DestinationPath C:\memory-archive
+          Set-Location C:\memory-archive
+          ```
+
+          ### 2. Install ma-app (offline, no internet required)
+          ```powershell
+          pip install (Get-ChildItem memory_archive-*.whl | Select-Object -First 1).Name
+          ```
+
+          ### 3. Run ma-core
+          ```powershell
+          .\ma-core.exe
+          # Or with a custom config:
+          # $env:MEMORY_ARCHIVE_CONFIG = "C:\path\to\config.json"; .\ma-core.exe
+          ```
+
+          ### 4. Run the TUI annotator
+          ```powershell
+          memory-archive annotate <session-id>
+          ```
+
+          ### 5. Run ma-kafka-producer (optional — dev tool only)
+          ```powershell
+          .\ma-kafka-producer.exe
+          ```
+
+          ## Configuration
+          ma-core looks for `%USERPROFILE%\.memory-archive\config.json` by default.
+          Override with the `MEMORY_ARCHIVE_CONFIG` environment variable.
+
+          ## License
+          Apache License 2.0 — see LICENSE.
+          '@ | Out-File -FilePath INSTALL.md -Encoding utf8
+
+      # Ensure root-level files exist before assembly
+      # LICENSE and README.md must be present for the cp steps below.
+      # 'touch' is a no-op when the file already exists; it only creates a
+      # zero-byte stub when the file is genuinely absent, which prevents a
+      # hard cp failure that would fail the entire job silently.
+      - name: Ensure LICENSE and README.md exist
+        shell: bash
+        run: |
+          touch LICENSE README.md
+
+      # Assemble staging directory and create archive
+      - name: Assemble and archive (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/ma-core staging/
+          cp target/${{ matrix.target }}/release/ma-kafka-producer staging/
+          cp wheel/*.whl staging/
+          cp LICENSE staging/
+          cp README.md staging/
+          cp INSTALL.md staging/
+          tar -czf ${{ matrix.artifact-name }}.tar.gz -C staging .
+
+      - name: Assemble and archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          Copy-Item target\${{ matrix.target }}\release\ma-core.exe staging\
+          Copy-Item target\${{ matrix.target }}\release\ma-kafka-producer.exe staging\
+          Get-Item wheel\*.whl | Copy-Item -Destination staging\
+          Copy-Item LICENSE   staging\
+          Copy-Item README.md staging\
+          Copy-Item INSTALL.md staging\
+          Compress-Archive -Path staging\* -DestinationPath ${{ matrix.artifact-name }}.zip
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: ${{ matrix.artifact-name }}.${{ matrix.archive-format }}
+          if-no-files-found: error
+          retention-days: 1
+
+# =============================================================================
+# JOB 3 — Create the GitHub Release and attach all archives
+# =============================================================================
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ma-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Verify archive count
+        run: |
+          count=$(find dist/ -maxdepth 1 -type f | wc -l)
+          echo "Found $count archive(s) in dist/"
+          if [ "$count" -ne 5 ]; then
+            echo "ERROR: expected 5 archives, got $count"
+            ls -lh dist/
+            exit 1
+          fi
+          ls -lh dist/
+
+      - name: Build release body
+        id: release-body
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            {
+              echo 'body<<RELEASE_BODY_EOF'
+              cat CHANGELOG.md
+              echo 'RELEASE_BODY_EOF'
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "body=Release ${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body: ${{ steps.release-body.outputs.body }}
+          files: dist/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,75 @@
+[package]
+name = "ma-core"
+description = "Memory Archive — Rust core process (event capture, file I/O, image marking, Redis, IPC server)"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ma-core"
+path = "src/main.rs"
+
+[dependencies]
+# Internal
+ma-proto = { path = "../ma-proto" }
+
+# Async
+tokio.workspace = true
+tokio-stream.workspace = true
+reqwest.workspace = true
+
+# Kafka
+rdkafka.workspace = true
+
+# Observability
+prometheus-client.workspace = true
+tracing-appender.workspace = true
+
+# Storage
+async-trait.workspace = true
+base64.workspace = true
+sha2.workspace = true
+rand.workspace = true
+aws-config.workspace = true
+
+# TLS
+rcgen.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+time.workspace = true
+tokio-rustls.workspace = true
+
+# cloud provider
+aws-sdk-s3.workspace = true
+regex.workspace = true
+google-cloud-storage.workspace = true
+bytes.workspace = true
+
+# gRPC
+tonic.workspace = true
+prost.workspace = true
+
+# Redis
+redis.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Image processing
+image.workspace = true
+imageproc.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Utilities
+uuid.workspace = true
+chrono.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

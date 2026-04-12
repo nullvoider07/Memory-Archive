@@ -1,0 +1,21 @@
+[package]
+name = "ma-kafka-producer"
+description = "Development tool: bridges Control-Center gRPC stream into Kafka"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ma-kafka-producer"
+path = "src/main.rs"
+
+[dependencies]
+ma-proto = { path = "../ma-proto" }
+
+rdkafka.workspace = true
+tonic.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,75 @@
+[workspace]
+members = [
+    "ma-core",
+    "ma-proto",
+    "ma-kafka-producer",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.10.0"
+edition = "2024"
+authors = ["Kartik (NullVoider)"]
+license = "Apache-2.0"
+
+# Shared dependency versions across the workspace
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+reqwest = { version = "0.12", features = ["json"] }
+
+# Kafka
+rdkafka = { version = "0.36", features = ["tokio", "cmake-build", "ssl"] }
+
+# Observability
+prometheus-client = "0.23"
+tracing-appender = "0.2"
+
+# Storage
+async-trait = "0.1"
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+
+# TLS
+rcgen = "0.12"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pemfile = "2"
+time = "0.3"
+tokio-rustls = "0.26"
+
+# cloud providers
+aws-config = { version = "1.1.7", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1.112.0"
+regex = "1"
+google-cloud-storage = "1.7"
+bytes = "1"
+
+# gRPC + protobuf
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
+# Redis
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Image processing
+image = "0.25"
+imageproc = "0.25"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
