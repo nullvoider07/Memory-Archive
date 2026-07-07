@@ -7,8 +7,16 @@
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
 **Version:** 0.11.0  
-**Last Updated:** April 2026  
+**Last Updated:** July 2026  
 **Developer:** Kartik (NullVoider)
+
+> **🔒 What's new in 0.11.0** — supply-chain and network-default hardening:
+> - **Verified installs.** `install.sh`, `install.ps1`, and `memory-archive update` download a `SHA256SUMS` manifest and verify each release archive before extracting it; a missing or mismatched checksum aborts the install.
+> - **Safe extraction.** Release archives are unpacked with per-member path-traversal guards — absolute paths, `..`, and destination-escaping symlinks are rejected.
+> - **Metrics endpoint fails closed.** The Prometheus endpoint now binds `127.0.0.1` by default (new `observability.metrics_bind_addr`). Binding a non-loopback address requires `observability.metrics_token`; without it, ma-core falls back to loopback and logs a CRITICAL rather than exposing unauthenticated metrics.
+> - **Config file permissions.** `config.json` (which may hold an annotator key) is written `0600`, parent dir `0700`.
+> - **Resilient installer.** `install.sh` resolves the latest version via the GitHub release redirect rather than the rate-limited API; if you do hit the API (its fallback, or `memory-archive update`), set `GITHUB_TOKEN` to raise the limit.
+> - **Cleaner uninstall.** `memory-archive uninstall` removes the `memory-archive` CLI launcher and any update-installed `lib/`, leaving no trace.
 
 > **📖 Documentation in progress** — Extended documentation covering in-depth deployment guides, architecture deep-dives, and operational runbooks for research teams, AI labs, and enterprise users is currently being written and will be published separately. This README serves as the primary reference in the meantime.
 >
@@ -131,7 +139,7 @@ Each session registration can specify its own `capture_server_addr` (The-Eyes) a
 
 ### Full Prometheus Observability
 
-`ma-core` exposes a Prometheus metrics endpoint (default port `9091`, optional Bearer token auth) with 25+ counters and gauges covering: active session count, steps captured per second, cloud upload queue depth and permanent failures, IPC connection counts and push queue depth, Kafka consumer lag, VLM request latency histograms (p50/p95/p99), per-provider error counts by type, circuit breaker state per session, pricing registry fetch status and manifest age, per-annotator active claims and auth failures, and storage routing decisions. Alert conditions are delivered via configurable webhook.
+`ma-core` exposes a Prometheus metrics endpoint (default port `9091`, bound to `127.0.0.1` by default; exposing it on a non-loopback address requires a Bearer token) with 25+ counters and gauges covering: active session count, steps captured per second, cloud upload queue depth and permanent failures, IPC connection counts and push queue depth, Kafka consumer lag, VLM request latency histograms (p50/p95/p99), per-provider error counts by type, circuit breaker state per session, pricing registry fetch status and manifest age, per-annotator active claims and auth failures, and storage routing decisions. Alert conditions are delivered via configurable webhook.
 
 ### TUI Annotation Interface
 
@@ -139,7 +147,7 @@ The built-in TUI (built on Textual) provides a two-pane interface: a virtual-scr
 
 ### Install, Update, and Uninstall Tooling
 
-Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) and Windows (`install.ps1`), covering both the Rust binaries and the Python wheel. The `memory-archive update` command checks the GitHub Releases API, downloads the latest platform archive, and replaces binaries in place. The `memory-archive uninstall` command removes binaries and optionally purges all local state (`--purge`). All three paths handle version transitions cleanly without leaving orphaned files.
+Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) and Windows (`install.ps1`), covering both the Rust binaries and the Python wheel. Every download is verified against a published `SHA256SUMS` manifest before extraction, and archives are unpacked with path-traversal guards. The `memory-archive update` command downloads and checksum-verifies the latest platform archive and replaces binaries in place. The `memory-archive uninstall` command removes the binaries and CLI launcher and optionally purges all local state (`--purge`). All three paths handle version transitions cleanly without leaving orphaned files.
 
 ---
 
@@ -364,7 +372,7 @@ Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) an
 curl -fsSL https://raw.githubusercontent.com/nullvoider07/memory-archive/master/install/install.sh | bash
 ```
 
-The installer downloads the platform-appropriate release archive from GitHub Releases, extracts `ma-core` and `ma-kafka-producer` to `~/.local/bin/` (or `/usr/local/bin/` with sudo), installs the Python wheel into your active Python environment, and verifies the installation with a `memory-archive ping`.
+The installer downloads the platform-appropriate release archive from GitHub Releases, **verifies it against the release `SHA256SUMS` before extracting** (a missing or mismatched checksum aborts the install), extracts `ma-core` and `ma-kafka-producer` to `~/.local/bin/` (or `/usr/local/bin/` with sudo), installs the Python wheel into your active Python environment, and verifies the installation with a `memory-archive ping`. If you hit a GitHub API rate limit, set `GITHUB_TOKEN` before running the installer.
 
 #### Windows (PowerShell one-line)
 
@@ -657,7 +665,7 @@ memory-archive compile --session "$SESSION_ID"
 
 ### Transport Security
 
-All local IPC communication uses a Unix domain socket at `~/.memory-archive/ma.sock`. The socket file has permissions `600`, and its parent directory (`~/.memory-archive/`) has permissions `700`. Only the owner process and processes running as the same user can connect.
+All local IPC communication uses a Unix domain socket at `~/.memory-archive/ma.sock`. The socket file has permissions `600`, and its parent directory (`~/.memory-archive/`) has permissions `700`. Only the owner process and processes running as the same user can connect. `config.json` — which may hold an annotator key in remote-annotator setups — is written with permissions `600` so it is not readable by other local users.
 
 All remote IPC communication (annotators, remote admin) uses TLS 1.3 exclusively. TLS 1.2 and below are rejected at the handshake level. A self-signed CA is generated by `rcgen` on the first `ma-core` start and stored at `~/.memory-archive/ca/ca-cert.pem` with a 10-year validity. The server certificate is generated from this CA, stored at `~/.memory-archive/ipc-cert.pem` with a 1-year validity, and has file permissions `600`. Clients do not use standard CA trust chains — instead, the SHA-256 fingerprint of the server certificate is pinned on the client side. No Trust On First Use (TOFU): the fingerprint must be explicitly configured before any connection is accepted. The fingerprint is distributed via a base64 connection profile string.
 
@@ -1354,7 +1362,8 @@ When `memory-archive annotator claim` is used (remote mode), the TUI starts a da
 | `model.circuit_breaker_reset_seconds` | config.json only | Seconds before half-open trial | automated | `60` |
 | `model.max_retries` | config.json only | Retries on retryable errors | automated | `3` |
 | `observability.metrics_port` | config.json only | Prometheus metrics endpoint port | both | `9091` |
-| `observability.metrics_token` | config.json only | Bearer token for metrics endpoint | both | — |
+| `observability.metrics_bind_addr` | config.json only | Metrics listener bind address. A non-loopback value requires `metrics_token`, else it falls back to loopback | both | `127.0.0.1` |
+| `observability.metrics_token` | config.json only | Bearer token for the metrics endpoint. **Required** to bind a non-loopback `metrics_bind_addr` | both | — |
 | `observability.log_level` | config.json only | Log level per component | both | `info` |
 | `observability.alert_webhook_url` | config.json only | Webhook URL for alert delivery | both | — |
 | `observability.memory_warn_mb` | config.json only | ma-core RSS memory warning threshold (MB) | both | — |
@@ -1568,7 +1577,7 @@ On `ma-core` startup, two sweeps run serially before the IPC server accepts conn
 
 ### Prometheus Metrics
 
-The Prometheus metrics endpoint is available at `http://{host}:{metrics_port}/metrics` (default port `9091`). If `observability.metrics_token` is set in `config.json`, requests must include an `Authorization: Bearer <token>` header.
+The Prometheus metrics endpoint is available at `http://{host}:{metrics_port}/metrics` (default port `9091`). By default it binds `127.0.0.1` (`observability.metrics_bind_addr`), so metrics are reachable only from the local host. To scrape it remotely, set `observability.metrics_bind_addr` to a routable address **and** `observability.metrics_token`; if a non-loopback address is set without a token, ma-core refuses to expose unauthenticated metrics and falls back to loopback with a CRITICAL log. When a token is set, requests must include an `Authorization: Bearer <token>` header.
 
 #### Capture Metrics (ma-core)
 
@@ -1864,7 +1873,7 @@ An incomplete session (disconnect without `done`) has its directory renamed to `
 
 ---
 
-**Last Updated:** April 2026  
+**Last Updated:** July 2026  
 **Developer:** Kartik (NullVoider)
 
 ---
