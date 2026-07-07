@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.10.0  
+**Version:** 0.11.0  
 **Last Updated:** April 2026  
 **Developer:** Kartik (NullVoider)
 

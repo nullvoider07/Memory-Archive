@@ -9,7 +9,7 @@ from rich.console import Console
 try:
     from ma_app import __version__
 except ImportError:
-    __version__ = "0.10.0"
+    __version__ = "0.11.0"
 
 app = typer.Typer(
     name="memory-archive",
