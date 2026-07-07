@@ -253,9 +253,10 @@ pub fn init_metrics(config: &ObservabilityConfig) -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("Registry already initialized"))?;
 
     let port = config.metrics_port;
+    let bind_addr = config.metrics_bind_addr.clone();
     let token = config.metrics_token.clone();
     tokio::spawn(async move {
-        serve_metrics(port, token).await;
+        serve_metrics(bind_addr, port, token).await;
     });
 
     tracing::info!(
@@ -331,8 +332,25 @@ pub fn init_metrics(config: &ObservabilityConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn serve_metrics(port: u16, token: String) {
-    let addr = format!("0.0.0.0:{port}");
+async fn serve_metrics(bind_addr: String, port: u16, token: String) {
+    // Fail closed: the metrics endpoint exposes session IDs, annotator IDs and
+    // token/cost counters. Refuse to bind a non-loopback address unless a token
+    // is configured; fall back to loopback rather than exit (metrics are
+    // non-essential to the daemon).
+    let is_loopback = matches!(bind_addr.as_str(), "127.0.0.1" | "::1" | "localhost");
+    let bind_addr = if !is_loopback && token.is_empty() {
+        tracing::error!(
+            requested = %bind_addr,
+            "CRITICAL: metrics_bind_addr is non-loopback but metrics_token is unset — \
+             refusing to expose unauthenticated metrics. Falling back to 127.0.0.1. \
+             Set observability.metrics_token to bind a public address."
+        );
+        "127.0.0.1".to_string()
+    } else {
+        bind_addr
+    };
+
+    let addr = format!("{bind_addr}:{port}");
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {

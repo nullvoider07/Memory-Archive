@@ -114,6 +114,11 @@ pub struct ObservabilityConfig {
     #[serde(default = "defaults::metrics_port")]
     pub metrics_port: u16,
 
+    /// Bind address for the Prometheus metrics listener. Defaults to loopback.
+    /// A non-loopback address requires metrics_token to be set (fail-closed).
+    #[serde(default = "defaults::metrics_bind_addr")]
+    pub metrics_bind_addr: String,
+
     #[serde(default)]
     pub metrics_token: String,
 
@@ -149,6 +154,7 @@ impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
             metrics_port: defaults::metrics_port(),
+            metrics_bind_addr: defaults::metrics_bind_addr(),
             metrics_token: String::new(),
             log_level: defaults::log_level(),
             log_output: defaults::log_output(),
@@ -268,6 +274,7 @@ mod defaults {
     pub fn kafka_lag_warn() -> i64 { 10_000 }
     pub fn metadata_flush_interval() -> u32 { 10 }
     pub fn metrics_port() -> u16 { 9091 }
+    pub fn metrics_bind_addr() -> String { "127.0.0.1".to_string() }
     pub fn log_level() -> String { "info".to_string() }
     pub fn log_output() -> String { "stdout".to_string() }
     pub fn memory_warn_mb() -> u64 { 4096 }
@@ -321,6 +328,15 @@ pub fn save(config: &Config) -> anyhow::Result<()> {
 
     std::fs::write(&path, json)
         .with_context(|| format!("Failed to write config: {}", path.display()))?;
+
+    // config.json may hold plaintext credentials (e.g. annotator_key), so
+    // restrict it to owner-only. NTFS ACLs cover the Windows case.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to restrict permissions on {}", path.display()))?;
+    }
 
     tracing::info!("Config saved to: {}", path.display());
     Ok(())

@@ -125,12 +125,25 @@ class Settings:
 
     # Save the current settings to config.json, creating the directory if needed
     def save(self) -> None:
-        """Write settings to config.json. Creates the directory if needed."""
+        """Write settings to config.json. Creates the directory if needed.
+
+        config.json may hold plaintext credentials (e.g. annotator_key), so the
+        file is restricted to owner-only (0600) and its parent to 0700.
+        """
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(CONFIG_PATH.parent, 0o700)
+        except OSError:
+            pass
         CONFIG_PATH.write_text(
             json.dumps(self._to_dict(), indent=2),
             encoding="utf-8",
         )
+        try:
+            os.chmod(CONFIG_PATH, 0o600)
+        except OSError:
+            # Best-effort on platforms without POSIX permissions (e.g. Windows).
+            pass
 
     # Helpers
     def _to_dict(self) -> dict:
