@@ -277,18 +277,63 @@ check_dependencies() {
 get_latest_release() {
     print_step "Fetching latest release information"
 
-    # Query the GitHub Releases API.
-    local api_response
-    api_response="$(
-        curl -fsSL \
-             -H "Accept: application/vnd.github+json" \
-             -H "X-GitHub-Api-Version: 2022-11-28" \
-             "${RELEASES_API}"
-    )" || die "Failed to reach GitHub API.  Check your internet connection."
+    # Primary: resolve the latest tag from github.com's redirect rather than the
+    # Releases API.  /releases/latest 302-redirects to /releases/tag/<TAG>; the
+    # final URL after following redirects carries the tag.  This path is served
+    # by the same CDN infra as the release download and is NOT subject to the
+    # api.github.com 60-req/hr unauthenticated rate limit, so it succeeds even
+    # when that quota is exhausted.
+    local resolved_url
+    resolved_url="$(
+        curl -fsSLI -o /dev/null -w '%{url_effective}' \
+             "${REPO_URL}/releases/latest" 2>/dev/null
+    )" || resolved_url=""
 
-    # Parse the tag name using grep + sed — no jq dependency required.
-    RELEASE_TAG="$(echo "${api_response}" | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
-    [[ -n "${RELEASE_TAG}" ]] || die "Could not parse release tag from GitHub API response."
+    if [[ "${resolved_url}" == *"/releases/tag/"* ]]; then
+        RELEASE_TAG="${resolved_url##*/releases/tag/}"
+        RELEASE_TAG="${RELEASE_TAG%%/*}"        # drop anything after the tag
+    fi
+
+    # Fallback: the Releases API.  Reached only if the redirect yielded no tag
+    # (e.g. an intermediary rewrote it).  Honours GITHUB_TOKEN to lift the limit
+    # from 60 to 5000 req/hr, and distinguishes rate-limiting from real network
+    # faults instead of blaming the connection for every failure.
+    if [[ -z "${RELEASE_TAG:-}" ]]; then
+        local auth_header=()
+        [[ -n "${GITHUB_TOKEN:-}" ]] && auth_header=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+
+        local api_response http_code
+        api_response="$(
+            curl -sSL -w $'\n%{http_code}' \
+                 ${auth_header[@]+"${auth_header[@]}"} \
+                 -H "Accept: application/vnd.github+json" \
+                 -H "X-GitHub-Api-Version: 2022-11-28" \
+                 "${RELEASES_API}" 2>/dev/null
+        )" || die "Could not reach GitHub (network or DNS error).  Check your connection."
+
+        http_code="${api_response##*$'\n'}"      # last line is the status code
+        api_response="${api_response%$'\n'*}"     # everything before it is the body
+
+        case "${http_code}" in
+            200) : ;;
+            403|429)
+                print_error "GitHub API rate limit exceeded (HTTP ${http_code})."
+                print_info "This is a rate limit, not a network fault.  Options:"
+                print_info "  • wait for the hourly reset, or retry from a different network/IP"
+                print_info "  • re-run with a token:  GITHUB_TOKEN=<token> bash install.sh"
+                exit 1
+                ;;
+            404)
+                die "No published release found for ${REPO_OWNER}/${REPO_NAME} (HTTP 404).  The repository may have only drafts or pre-releases." ;;
+            *)
+                die "GitHub API returned unexpected HTTP ${http_code}." ;;
+        esac
+
+        # Parse the tag name using grep + sed — no jq dependency required.
+        RELEASE_TAG="$(echo "${api_response}" | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+    fi
+
+    [[ -n "${RELEASE_TAG:-}" ]] || die "Could not determine the latest release tag."
 
     # Build the direct download URL for this platform's archive.
     DOWNLOAD_URL="${REPO_URL}/releases/download/${RELEASE_TAG}/${ARTIFACT_NAME}"
