@@ -311,6 +311,44 @@ function Invoke-DownloadPackage {
 }
 
 # =============================================================================
+# 7b. VERIFY ARTIFACT INTEGRITY (SHA-256)
+# =============================================================================
+
+function Invoke-VerifyChecksum {
+    Write-Step "Verifying artifact integrity"
+
+    $sumsUrl  = "$REPO_URL/releases/download/$($script:RELEASE_TAG)/SHA256SUMS"
+    $sumsFile = Join-Path $TMP_DIR "SHA256SUMS"
+    $destFile = Join-Path $TMP_DIR $ARTIFACT_NAME
+
+    # A missing checksums file is a hard failure — refusing to install an
+    # unverified artifact prevents a strip/downgrade attack.
+    & $script:CURL_BIN -fsSL -o $sumsFile $sumsUrl
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $sumsFile)) {
+        Invoke-Die "SHA256SUMS not found for $($script:RELEASE_TAG). Refusing to install unverified artifacts.`n  Expected: $sumsUrl"
+    }
+
+    $expected = $null
+    foreach ($line in Get-Content $sumsFile) {
+        $parts = $line -split '\s+', 2
+        if ($parts.Count -eq 2 -and $parts[1].Trim() -eq $ARTIFACT_NAME) {
+            $expected = $parts[0].Trim().ToLower()
+            break
+        }
+    }
+    if (-not $expected) {
+        Invoke-Die "No checksum entry for $ARTIFACT_NAME in SHA256SUMS. Refusing to install."
+    }
+
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $destFile).Hash.ToLower()
+    if ($actual -ne $expected) {
+        Invoke-Die "Checksum mismatch for $ARTIFACT_NAME — possible tampering.`n  expected: $expected`n  actual  : $actual"
+    }
+
+    Write-Ok "Checksum verified (SHA-256)"
+}
+
+# =============================================================================
 # 8. EXTRACT THE PACKAGE
 # =============================================================================
 
@@ -321,6 +359,23 @@ function Invoke-ExtractPackage {
     New-Item -ItemType Directory -Force -Path $script:EXTRACT_DIR | Out-Null
 
     $zipPath = Join-Path $TMP_DIR $ARTIFACT_NAME
+
+    # Traversal guard: reject any entry with a rooted path or a '..' component
+    # before extracting, so a crafted archive cannot write outside EXTRACT_DIR
+    # (CVE-2007-4559 class).
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+    try {
+        foreach ($entry in $zip.Entries) {
+            $name = $entry.FullName
+            if ([System.IO.Path]::IsPathRooted($name) -or
+                $name -match '(^|[\\/])\.\.([\\/]|$)') {
+                Invoke-Die "Unsafe path in archive, refusing to extract: $name"
+            }
+        }
+    } finally {
+        $zip.Dispose()
+    }
 
     # Expand-Archive extracts flat archives directly into the destination dir.
     # -Force overwrites any files if extract dir already has contents.
@@ -498,6 +553,7 @@ function Main {
         New-Item -ItemType Directory -Force -Path $TMP_DIR | Out-Null
 
         Invoke-DownloadPackage            # section 7
+        Invoke-VerifyChecksum             # section 7b
         Invoke-ExtractPackage             # section 8
         Invoke-InstallComponents          # section 9
         Invoke-UpdatePath                 # section 10

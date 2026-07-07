@@ -373,6 +373,44 @@ download_package() {
 }
 
 # ============================================================================
+# 7b. VERIFY ARTIFACT INTEGRITY (SHA-256)
+# ============================================================================
+
+verify_checksum() {
+    print_step "Verifying artifact integrity"
+
+    local sums_url="${REPO_URL}/releases/download/${RELEASE_TAG}/SHA256SUMS"
+    local sums_file="${TMP_DIR}/SHA256SUMS"
+
+    # A missing checksums file is a hard failure — refusing to install an
+    # unverified artifact prevents a strip/downgrade attack.
+    if ! curl -fsSL -o "${sums_file}" "${sums_url}"; then
+        die "SHA256SUMS not found for ${RELEASE_TAG}. Refusing to install unverified artifacts.\n  Expected: ${sums_url}"
+    fi
+
+    local expected
+    expected="$(grep -E "[[:space:]]${ARTIFACT_NAME}\$" "${sums_file}" | awk '{print $1}' | head -1)"
+    if [[ -z "${expected}" ]]; then
+        die "No checksum entry for ${ARTIFACT_NAME} in SHA256SUMS. Refusing to install."
+    fi
+
+    local actual
+    if command_exists sha256sum; then
+        actual="$(sha256sum "${TMP_DIR}/${ARTIFACT_NAME}" | awk '{print $1}')"
+    elif command_exists shasum; then
+        actual="$(shasum -a 256 "${TMP_DIR}/${ARTIFACT_NAME}" | awk '{print $1}')"
+    else
+        die "Neither sha256sum nor shasum found — cannot verify artifact integrity."
+    fi
+
+    if [[ "${actual}" != "${expected}" ]]; then
+        die "Checksum mismatch for ${ARTIFACT_NAME} — possible tampering.\n  expected: ${expected}\n  actual  : ${actual}"
+    fi
+
+    print_ok "Checksum verified (SHA-256)"
+}
+
+# ============================================================================
 # 8. EXTRACT THE PACKAGE
 # ============================================================================
 
@@ -382,11 +420,22 @@ extract_package() {
     readonly EXTRACT_DIR="${TMP_DIR}/extracted"
     mkdir -p "${EXTRACT_DIR}"
 
+    # Traversal guard: reject any member with an absolute path or a '..'
+    # component before extracting, so a crafted archive cannot write outside
+    # EXTRACT_DIR (CVE-2007-4559 class).
+    local unsafe
+    unsafe="$(tar -tzf "${TMP_DIR}/${ARTIFACT_NAME}" \
+              | grep -E '^/|(^|/)\.\.(/|$)' || true)"
+    if [[ -n "${unsafe}" ]]; then
+        die "Unsafe path(s) in archive, refusing to extract:\n${unsafe}"
+    fi
+
     # -x  extract
     # -z  decompress gzip
     # -f  read from file
     # -C  change to target directory before extracting
-    tar -xzf "${TMP_DIR}/${ARTIFACT_NAME}" -C "${EXTRACT_DIR}" \
+    # --no-same-owner  do not restore archived uid/gid (defensive)
+    tar -xzf "${TMP_DIR}/${ARTIFACT_NAME}" -C "${EXTRACT_DIR}" --no-same-owner \
     || die "Failed to extract ${ARTIFACT_NAME}.  The archive may be corrupt."
 
     print_ok "Extracted to ${EXTRACT_DIR}"
@@ -572,6 +621,7 @@ main() {
     check_dependencies           # section 5
     get_latest_release           # section 6
     download_package             # section 7
+    verify_checksum              # section 7b
     extract_package              # section 8
     install_components           # section 9
     update_path                  # section 10

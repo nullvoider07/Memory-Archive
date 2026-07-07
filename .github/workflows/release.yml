@@ -518,6 +518,17 @@ jobs:
           fi
           ls -lh dist/
 
+      # Generate SHA256SUMS over the archives so the installers can verify
+      # artifact integrity before extraction. Runs AFTER the count guard so the
+      # checksums file itself is not counted among the 5 archives. The release
+      # upload globs dist/* so SHA256SUMS is attached automatically.
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          echo "----- SHA256SUMS -----"
+          cat SHA256SUMS
+
       - name: Build release body
         id: release-body
         run: |

@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import NoReturn, Optional
 
 import typer
 from rich.console import Console
@@ -20,7 +20,7 @@ from rich.console import Console
 try:
     from ma_app import __version__
 except ImportError:
-    __version__ = "0.10.0"
+    __version__ = "0.11.0"
 
 # =============================================================================
 # Constants
@@ -50,7 +50,7 @@ _console = Console()
 # Internal helpers
 # =============================================================================
 
-def _abort(message: str) -> None:
+def _abort(message: str) -> NoReturn:
     """Print a red error message and exit with code 1."""
     _console.print(f"[red]  [XX] ERROR: {message}[/red]")
     raise typer.Exit(code=1)
@@ -173,15 +173,94 @@ def _download_with_curl(url: str, dest: Path) -> None:
         urllib.request.urlretrieve(url, dest)
 
 
+def _verify_archive_checksum(archive_path: Path, artifact: str, tag: str) -> None:
+    """Verify archive_path against the release SHA256SUMS.
+
+    Hard-fails (via _abort) if SHA256SUMS is missing, has no entry for the
+    artifact, or the hash does not match — refusing to install an unverified or
+    tampered artifact (prevents strip/downgrade attacks).
+    """
+    import hashlib
+    import urllib.request
+
+    sums_url = f"{REPO_URL}/releases/download/{tag}/SHA256SUMS"
+    try:
+        with urllib.request.urlopen(sums_url, timeout=15) as resp:
+            sums_text = resp.read().decode("utf-8", "replace")
+    except Exception as e:  # noqa: BLE001 — any failure is a hard stop
+        _abort(
+            f"SHA256SUMS not found for {tag}: {e}\n"
+            "  Refusing to install unverified artifacts."
+        )
+
+    expected: Optional[str] = None
+    for line in sums_text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            name = parts[1].strip().lstrip("*")   # tolerate binary-mode '*' prefix
+            if name == artifact:
+                expected = parts[0].strip().lower()
+                break
+    if not expected:
+        _abort(f"No checksum entry for {artifact} in SHA256SUMS. Refusing to install.")
+
+    h = hashlib.sha256()
+    with open(archive_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    actual = h.hexdigest().lower()
+
+    if actual != expected:
+        _abort(
+            f"Checksum mismatch for {artifact} — possible tampering.\n"
+            f"  expected: {expected}\n"
+            f"  actual  : {actual}"
+        )
+    _console.print("[green]  [OK] Checksum verified (SHA-256)[/green]")
+
+
+def _within(dest: Path, target: Path) -> bool:
+    """Return True if target resolves to a path inside dest (traversal guard)."""
+    dest_r = dest.resolve()
+    try:
+        target.resolve().relative_to(dest_r)
+        return True
+    except ValueError:
+        return False
+
+
 def _extract_archive(archive: Path, dest: Path, os_name: str) -> None:
-    """Extract a flat .tar.gz (Linux/macOS) or .zip (Windows) into dest."""
+    """Safely extract a flat .tar.gz (Linux/macOS) or .zip (Windows) into dest.
+
+    Every member is validated before writing: absolute paths, ``..`` components,
+    and tar sym/hardlinks pointing outside ``dest`` are rejected. This prevents
+    a crafted archive from writing outside the destination (CVE-2007-4559 class).
+    """
+    dest = dest.resolve()
     if os_name == "windows":
         import zipfile
         with zipfile.ZipFile(archive, "r") as zf:
+            for name in zf.namelist():
+                p = Path(name)
+                if p.is_absolute() or ".." in p.parts or not _within(dest, dest / name):
+                    _abort(f"Unsafe path in archive, refusing to extract: {name!r}")
             zf.extractall(dest)
     else:
         import tarfile
         with tarfile.open(archive, "r:gz") as tf:
+            for m in tf.getmembers():
+                mp = Path(m.name)
+                if mp.is_absolute() or ".." in mp.parts or not _within(dest, dest / m.name):
+                    _abort(f"Unsafe path in archive, refusing to extract: {m.name!r}")
+                if m.issym() or m.islnk():
+                    # Validate the link *target*, resolved relative to the member's
+                    # own directory (symlink) or the archive root (hardlink).
+                    if m.islnk():
+                        link_target = dest / m.linkname
+                    else:
+                        link_target = dest / mp.parent / m.linkname
+                    if Path(m.linkname).is_absolute() or not _within(dest, link_target):
+                        _abort(f"Unsafe link in archive, refusing to extract: {m.name!r} -> {m.linkname!r}")
             tf.extractall(dest)
 
 
@@ -432,6 +511,9 @@ def _update_command(
             f"[green]  [OK] Download complete ({size_mb:.1f} MB)[/green]"
         )
 
+        # 5b. Verify artifact integrity before touching its contents.
+        _verify_archive_checksum(archive_path, artifact, latest_tag)
+
         # 6. Extract
         _console.print("Extracting archive …")
         extract_dir = tmp_dir / "extracted"
@@ -576,17 +658,31 @@ def _uninstall_command(
     docs_to_remove: list[Path] = []
     cfg_to_remove:  list[Path] = []
 
-    # Rust binaries
-    # Check the computed install dir AND anywhere on PATH so we catch
-    # installs done outside the default location.
+    # Executables to remove: the Rust binaries PLUS the `memory-archive` CLI
+    # launcher.  install.sh copies the launcher (a pip entry-point script) into
+    # INSTALL_DIR alongside the binaries; that copy is not tracked by pip, so it
+    # must be discovered and removed explicitly, or the command stays on PATH
+    # after uninstall.
+    removable_names = [*RUST_BINARIES, PIP_PACKAGE_NAME]
+
+    # Check the computed install dir AND every directory on PATH so we catch
+    # installs done outside the default location and *all* copies of a launcher
+    # (INSTALL_DIR plus the pip scripts dir) — shutil.which only returns the
+    # first PATH match, which would leave a shadowed second copy behind.  Only
+    # files named exactly like our executables are ever removed, so scanning
+    # shared dirs is safe.
     binary_search_dirs: set[Path] = {bin_dir}
-    for b in RUST_BINARIES:
+    for b in removable_names:
         found = shutil.which(b) or shutil.which(f"{b}.exe")
         if found:
             binary_search_dirs.add(Path(found).parent)
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry = entry.strip()
+        if entry:
+            binary_search_dirs.add(Path(entry))
 
     for search_dir in binary_search_dirs:
-        for b in RUST_BINARIES:
+        for b in removable_names:
             name = f"{b}.exe" if is_windows else b
             p    = search_dir / name
             if p.exists() and p not in bins_to_remove:
@@ -600,6 +696,17 @@ def _uninstall_command(
     if data_dir.exists():
         docs_to_remove.append(data_dir)
 
+    # Python package installed by `memory-archive update` into MA_HOME/lib via
+    # `pip install --prefix`.  That install is invisible to `pip show` here, so
+    # it is removed explicitly.  Guard on the MA_HOME directory name so a
+    # non-standard install location (e.g. ma-core copied into /usr/local/bin)
+    # can never turn this into a delete of a shared system lib directory.
+    install_home = bin_dir.parent
+    if install_home.name in {".memory-archive", "memory-archive", "MemoryArchive"}:
+        lib_dir = install_home / "lib"
+        if lib_dir.exists() and lib_dir not in docs_to_remove:
+            docs_to_remove.append(lib_dir)
+
     # Config + TLS certs (--purge only)
     # ~/.memory-archive/ holds config.json, CA cert/key, IPC cert/key, PID files.
     # Only removed when explicitly requested with --purge.
@@ -608,7 +715,7 @@ def _uninstall_command(
 
     # 2. Print what will be removed
     _console.print("")
-    _console.print("[yellow bold]  Rust binaries:[/yellow bold]")
+    _console.print("[yellow bold]  Binaries & CLI launcher:[/yellow bold]")
     if bins_to_remove:
         for p in bins_to_remove:
             _console.print(f"    - {p}")
@@ -633,7 +740,7 @@ def _uninstall_command(
         _console.print(f"    - {PIP_PACKAGE_NAME} not found via pip")
 
     _console.print("")
-    _console.print("[yellow bold]  Documentation:[/yellow bold]")
+    _console.print("[yellow bold]  Program files:[/yellow bold]")
     if docs_to_remove:
         for p in docs_to_remove:
             _console.print(f"    - {p}")
@@ -831,6 +938,13 @@ def _uninstall_command(
     else:
         # Linux / macOS: remove the PATH export the installer wrote to rc files.
         _remove_path_from_shell_rc(bin_dir)
+
+        # Remove the now-empty bin directory (binaries + launcher gone).
+        try:
+            if bin_dir.exists() and not any(bin_dir.iterdir()):
+                bin_dir.rmdir()
+        except OSError:
+            pass
 
         # Remove MA_HOME if it is now empty.
         ma_home = bin_dir.parent        # ~/.memory-archive or /opt/memory-archive
