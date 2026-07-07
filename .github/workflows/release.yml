@@ -165,7 +165,9 @@ jobs:
       # native Linux. Skipped for arm64 cross-compile (handled in Docker).
       - name: Install cmake + OpenSSL (Linux native)
         if: runner.os == 'Linux' && !matrix.cross
-        run: sudo apt-get install -y cmake libssl-dev pkg-config libcurl4-openssl-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libssl-dev pkg-config libcurl4-openssl-dev
 
       # Configure OpenSSL (Windows)
       # rdkafka's `ssl` feature depends on openssl-sys. On Windows, openssl-sys
@@ -260,6 +262,7 @@ jobs:
       - name: Strip binaries (Linux arm64 cross)
         if: matrix.cross
         run: |
+          sudo apt-get update
           sudo apt-get install -y binutils-aarch64-linux-gnu
           aarch64-linux-gnu-strip target/${{ matrix.target }}/release/ma-core
           aarch64-linux-gnu-strip target/${{ matrix.target }}/release/ma-kafka-producer
