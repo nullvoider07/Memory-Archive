@@ -316,8 +316,12 @@ pub fn load() -> anyhow::Result<Config> {
 
 #[allow(dead_code)]
 pub fn save(config: &Config) -> anyhow::Result<()> {
-    let path = config_path();
+    save_to(&config_path(), config)
+}
 
+/// Serialise `config` to `path`, restricting the file to owner-only (0600).
+/// Separated from `save()` so it can be exercised against a temp path in tests.
+pub fn save_to(path: &Path, config: &Config) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
@@ -326,7 +330,7 @@ pub fn save(config: &Config) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(config)
         .context("Failed to serialise config")?;
 
-    std::fs::write(&path, json)
+    std::fs::write(path, json)
         .with_context(|| format!("Failed to write config: {}", path.display()))?;
 
     // config.json may hold plaintext credentials (e.g. annotator_key), so
@@ -334,10 +338,33 @@ pub fn save(config: &Config) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("Failed to restrict permissions on {}", path.display()))?;
     }
 
     tracing::info!("Config saved to: {}", path.display());
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn save_to_writes_config_0600() {
+        let dir = std::env::temp_dir().join(format!("ma-cfg-test-{}", std::process::id()));
+        let path = dir.join("config.json");
+        save_to(&path, &Config::default()).expect("save_to failed");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "config.json must be owner-only (0600), got {mode:o}");
+
+        // Round-trips back to an equivalent config.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed: Config = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.ipc_bind_addr, Config::default().ipc_bind_addr);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

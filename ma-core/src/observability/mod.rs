@@ -332,25 +332,32 @@ pub fn init_metrics(config: &ObservabilityConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Decide the effective metrics bind address. Fail closed: the metrics endpoint
+/// exposes session IDs, annotator IDs and token/cost counters, so a non-loopback
+/// bind without a token is downgraded to loopback. Returns
+/// `(effective_addr, fell_back)` — `fell_back` is true when the request was
+/// downgraded. Pure and side-effect free so it is unit-testable.
+fn resolve_metrics_bind(bind_addr: &str, token_empty: bool) -> (String, bool) {
+    let is_loopback = matches!(bind_addr, "127.0.0.1" | "::1" | "localhost");
+    if !is_loopback && token_empty {
+        ("127.0.0.1".to_string(), true)
+    } else {
+        (bind_addr.to_string(), false)
+    }
+}
+
 async fn serve_metrics(bind_addr: String, port: u16, token: String) {
-    // Fail closed: the metrics endpoint exposes session IDs, annotator IDs and
-    // token/cost counters. Refuse to bind a non-loopback address unless a token
-    // is configured; fall back to loopback rather than exit (metrics are
-    // non-essential to the daemon).
-    let is_loopback = matches!(bind_addr.as_str(), "127.0.0.1" | "::1" | "localhost");
-    let bind_addr = if !is_loopback && token.is_empty() {
+    let (effective_addr, fell_back) = resolve_metrics_bind(&bind_addr, token.is_empty());
+    if fell_back {
         tracing::error!(
             requested = %bind_addr,
             "CRITICAL: metrics_bind_addr is non-loopback but metrics_token is unset — \
              refusing to expose unauthenticated metrics. Falling back to 127.0.0.1. \
              Set observability.metrics_token to bind a public address."
         );
-        "127.0.0.1".to_string()
-    } else {
-        bind_addr
-    };
+    }
 
-    let addr = format!("{bind_addr}:{port}");
+    let addr = format!("{effective_addr}:{port}");
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -526,4 +533,34 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         return false;
     }
     a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_metrics_bind;
+
+    #[test]
+    fn loopback_without_token_is_allowed() {
+        assert_eq!(resolve_metrics_bind("127.0.0.1", true), ("127.0.0.1".to_string(), false));
+        assert_eq!(resolve_metrics_bind("::1", true), ("::1".to_string(), false));
+        assert_eq!(resolve_metrics_bind("localhost", true), ("localhost".to_string(), false));
+    }
+
+    #[test]
+    fn public_bind_without_token_falls_back_to_loopback() {
+        let (addr, fell_back) = resolve_metrics_bind("0.0.0.0", true);
+        assert_eq!(addr, "127.0.0.1");
+        assert!(fell_back, "must downgrade an unauthenticated public bind");
+
+        let (addr, fell_back) = resolve_metrics_bind("10.0.0.5", true);
+        assert_eq!(addr, "127.0.0.1");
+        assert!(fell_back);
+    }
+
+    #[test]
+    fn public_bind_with_token_is_allowed() {
+        let (addr, fell_back) = resolve_metrics_bind("0.0.0.0", false);
+        assert_eq!(addr, "0.0.0.0");
+        assert!(!fell_back, "a token authorises a public bind");
+    }
 }

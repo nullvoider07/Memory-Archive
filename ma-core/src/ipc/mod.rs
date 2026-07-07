@@ -1207,7 +1207,13 @@ async fn handle_message(
                         let scan_dir = if prefix.is_empty() {
                             base.clone()
                         } else {
-                            base.join(&prefix)
+                            match validate_relative_path(&record.memory_path, &prefix) {
+                                Ok(p) => p,
+                                Err(e) => return OutboundMessage::Error {
+                                    code: "INVALID_PATH".to_string(),
+                                    message: e.to_string(),
+                                },
+                            }
                         };
                         list_dir_recursive(&scan_dir, &base)
                     };
@@ -2157,6 +2163,16 @@ async fn handle_annotator_message(
         }
 
         InboundMessage::HeartbeatClaim { session_id, claim_id } => {
+            // Only the annotator holding the claim may refresh its TTL. Without
+            // this gate, refresh_claim's id check alone could be bypassed and an
+            // annotator could keep another annotator's claim alive indefinitely.
+            let owner = registry.get_claim_owner(&session_id).await.ok().flatten();
+            if owner.as_deref() != Some(annotator_id) {
+                return OutboundMessage::Error {
+                    code: "NOT_OWNER".to_string(),
+                    message: "You do not hold the claim for this session.".to_string(),
+                };
+            }
             match registry.refresh_claim(&session_id, &claim_id, CLAIM_TTL_SECS).await {
                 Err(e) => OutboundMessage::Error {
                     code: "REDIS_ERROR".to_string(),
@@ -2425,7 +2441,17 @@ async fn handle_annotator_session_op(
                         }
                     } else {
                         let base = std::path::PathBuf::from(&record.memory_path);
-                        let scan_dir = if prefix.is_empty() { base.clone() } else { base.join(&prefix) };
+                        let scan_dir = if prefix.is_empty() {
+                            base.clone()
+                        } else {
+                            match validate_relative_path(&record.memory_path, &prefix) {
+                                Ok(p) => p,
+                                Err(e) => return OutboundMessage::Error {
+                                    code: "INVALID_PATH".to_string(),
+                                    message: e.to_string(),
+                                },
+                            }
+                        };
                         list_dir_recursive(&scan_dir, &base)
                     };
                     OutboundMessage::SessionFileList { session_id, files }
@@ -2434,12 +2460,48 @@ async fn handle_annotator_session_op(
         }
 
         InboundMessage::UploadFile { session_id, relative_path, bytes, content_type } => {
+            // Annotator write authority enforcement — identical to the inner
+            // handler. Only reasoning.jsonl (source forced to "human") and
+            // metadata.json (annotator-updatable fields only) are writable;
+            // enforced server-side for training-data integrity.
+            const ALLOWED_REASONING: &str = "reasoning/reasoning.jsonl";
+            const ALLOWED_METADATA:  &str = "metadata.json";
+
+            if relative_path != ALLOWED_REASONING && relative_path != ALLOWED_METADATA {
+                return OutboundMessage::Error {
+                    code: "WRITE_FORBIDDEN".to_string(),
+                    message: format!(
+                        "Annotators may only write to '{ALLOWED_REASONING}' or '{ALLOWED_METADATA}'. \
+                         Path '{relative_path}' is not permitted."
+                    ),
+                };
+            }
+
             if bytes.len() > MAX_UPLOAD_BYTES {
                 return OutboundMessage::Error {
                     code: "PAYLOAD_TOO_LARGE".to_string(),
                     message: format!("Upload exceeds maximum allowed size of {} bytes", MAX_UPLOAD_BYTES),
                 };
             }
+
+            let write_bytes: Vec<u8> = if relative_path == ALLOWED_REASONING {
+                match enforce_reasoning_source_human(&bytes) {
+                    Ok(b) => b,
+                    Err(e) => return OutboundMessage::Error {
+                        code: "INVALID_PAYLOAD".to_string(),
+                        message: format!("reasoning.jsonl parse error: {e}"),
+                    },
+                }
+            } else {
+                match enforce_metadata_annotator_fields(&bytes) {
+                    Ok(b) => b,
+                    Err(e) => return OutboundMessage::Error {
+                        code: "INVALID_PAYLOAD".to_string(),
+                        message: format!("metadata.json parse error: {e}"),
+                    },
+                }
+            };
+
             match registry.get(&session_id).await {
                 Err(e) => OutboundMessage::Error {
                     code: "SESSION_NOT_FOUND".to_string(),
@@ -2448,14 +2510,8 @@ async fn handle_annotator_session_op(
                 Ok(record) => {
                     let storage = storage_router.resolve_for_session(&record);
                     let result: anyhow::Result<()> = if config.storage_mode == "cloud_primary" {
-                        if relative_path.contains("..") || relative_path.starts_with('/') {
-                            return OutboundMessage::Error {
-                                code: "INVALID_PATH".to_string(),
-                                message: "relative_path must not contain '..' or start with '/'".to_string(),
-                            };
-                        }
                         let cloud_path = format!("{}/{}", record.memory_name, relative_path);
-                        storage.put(&session_id, &cloud_path, bytes, &content_type).await
+                        storage.put(&session_id, &cloud_path, write_bytes, &content_type).await
                     } else {
                         match validate_relative_path(&record.memory_path, &relative_path) {
                             Err(e) => return OutboundMessage::Error {
@@ -2466,7 +2522,7 @@ async fn handle_annotator_session_op(
                                 if let Some(parent) = abs.parent() {
                                     tokio::fs::create_dir_all(parent).await?;
                                 }
-                                tokio::fs::write(&abs, &bytes).await?;
+                                tokio::fs::write(&abs, &write_bytes).await?;
                                 Ok(())
                             }.await,
                         }
@@ -2564,4 +2620,37 @@ async fn handle_tcp_connection(
 
     tracing::debug!("IPC TCP: authenticated from {peer}");
     handle_connection_inner(lines, writer, registry, config, done_handles, push_handles, kafka_session_map, storage_router, reasoning_maps).await
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::validate_relative_path;
+
+    const BASE: &str = "/tmp/ma-session-base";
+
+    #[test]
+    fn accepts_paths_inside_base() {
+        assert!(validate_relative_path(BASE, "reasoning/reasoning.jsonl").is_ok());
+        assert!(validate_relative_path(BASE, "metadata.json").is_ok());
+        // Interior '..' that stays within base is allowed.
+        assert!(validate_relative_path(BASE, "a/../b").is_ok());
+    }
+
+    #[test]
+    fn rejects_parent_traversal() {
+        // The M-2 case: a prefix that climbs out of the session directory.
+        assert!(validate_relative_path(BASE, "../etc/passwd").is_err());
+        assert!(validate_relative_path(BASE, "a/../../etc").is_err());
+        assert!(validate_relative_path(BASE, "../../../../etc").is_err());
+    }
+
+    #[test]
+    fn rejects_absolute_paths() {
+        assert!(validate_relative_path(BASE, "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!(validate_relative_path(BASE, "").is_err());
+    }
 }

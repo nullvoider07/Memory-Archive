@@ -300,7 +300,7 @@ impl SessionRegistry {
     ) -> anyhow::Result<bool> {
         let key = format!("claim:{session_id}");
         let val: Option<String> = self.conn.get(&key).await.context("GET claim verify failed")?;
-        Ok(val.as_deref().map(|v| v.contains(claim_id)).unwrap_or(false))
+        Ok(val.as_deref().map(|v| claim_value_matches(v, claim_id)).unwrap_or(false))
     }
 
     /// Refresh a claim's TTL. Returns false if the claim no longer exists
@@ -316,7 +316,7 @@ impl SessionRegistry {
 
         let still_valid = current
             .as_deref()
-            .map(|v| v.contains(claim_id))
+            .map(|v| claim_value_matches(v, claim_id))
             .unwrap_or(false);
 
         if still_valid {
@@ -712,6 +712,55 @@ impl SessionRegistry {
 
 // Unit tests
 //
+/// True iff the stored claim value (`"{annotator_id}:{claim_id}"`) ends with
+/// exactly `":{claim_id}"` and `claim_id` is non-empty.
+///
+/// Replaces a bare `str::contains`, which is a substring test: `contains("")`
+/// is always true, so an empty (or substring) `claim_id` would spuriously match
+/// any claim. Requiring a non-empty id that is the final `:`-delimited segment
+/// makes the check exact.
+fn claim_value_matches(stored: &str, claim_id: &str) -> bool {
+    !claim_id.is_empty()
+        && stored
+            .strip_suffix(claim_id)
+            .map(|prefix| prefix.ends_with(':'))
+            .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod claim_match_tests {
+    use super::claim_value_matches;
+
+    #[test]
+    fn exact_claim_id_matches() {
+        assert!(claim_value_matches("annot-1:abc-123", "abc-123"));
+    }
+
+    #[test]
+    fn empty_claim_id_never_matches() {
+        // The bug: "".contains was always true. Must now be false.
+        assert!(!claim_value_matches("annot-1:abc-123", ""));
+        assert!(!claim_value_matches("annot-1:", ""));
+    }
+
+    #[test]
+    fn substring_claim_id_does_not_match() {
+        assert!(!claim_value_matches("annot-1:abc-123", "123"));   // suffix but not a segment
+        assert!(!claim_value_matches("annot-1:abc-123", "abc"));   // prefix of the id
+        assert!(!claim_value_matches("annot-1:abc-123", "abc-12")); // partial id
+    }
+
+    #[test]
+    fn wrong_claim_id_does_not_match() {
+        assert!(!claim_value_matches("annot-1:abc-123", "def-456"));
+    }
+
+    #[test]
+    fn annotator_id_containing_colon_still_matches_final_segment() {
+        assert!(claim_value_matches("a:b:the-claim", "the-claim"));
+    }
+}
+
 // These tests require a running Redis instance.
 // Run with: cargo test -p ma-core -- --test-threads=1
 //
