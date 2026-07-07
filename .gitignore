@@ -1,2 +1,11 @@
 /target/
 ma-proto/src/gen/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local-only artifacts (not shipped in the repo)
+/tests/
+/AUDIT-0.11.0.md

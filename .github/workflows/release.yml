@@ -306,7 +306,7 @@ jobs:
 
           ### 2. Install ma-app (offline, no internet required)
           ```bash
-          pip install memory_archive-*.whl
+          pip install *.whl
           ```
 
           ### 3. Make binaries executable (if needed)
@@ -361,7 +361,7 @@ jobs:
 
           ### 2. Install ma-app (offline, no internet required)
           ```bash
-          pip3 install memory_archive-*.whl
+          pip3 install *.whl
           ```
 
           ### 3. Clear Gatekeeper quarantine (first run only)
@@ -415,7 +415,7 @@ jobs:
 
           ### 2. Install ma-app (offline, no internet required)
           ```powershell
-          pip install (Get-ChildItem memory_archive-*.whl | Select-Object -First 1).Name
+          pip install (Get-ChildItem *.whl | Select-Object -First 1).Name
           ```
 
           ### 3. Run ma-core
@@ -525,7 +525,9 @@ jobs:
       - name: Generate SHA256SUMS
         run: |
           cd dist
-          sha256sum * > SHA256SUMS
+          # Hash the release archives explicitly rather than '*' so SHA256SUMS
+          # can never include itself (e.g. on a re-run where it already exists).
+          sha256sum ma-* > SHA256SUMS
           echo "----- SHA256SUMS -----"
           cat SHA256SUMS
 
