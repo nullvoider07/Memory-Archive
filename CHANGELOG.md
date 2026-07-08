@@ -3,9 +3,10 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.11.0] — 2026-07-07
+## [0.11.0] — 2026-07-08
 
-Supply-chain and network-default hardening release.
+Supply-chain and network-default hardening release, with an installer/updater
+interface cleanup.
 
 ### Security
 
@@ -41,12 +42,25 @@ Supply-chain and network-default hardening release.
   raise the limit on the API-based paths (`install.ps1`, `memory-archive update`).
 - The release pipeline publishes a `SHA256SUMS` asset alongside the five platform
   archives.
+- **Cleaner installer/updater output.** `install.sh`, `install.ps1`, and
+  `memory-archive update` no longer flood the terminal with pip's resolver
+  output — the wheel install runs quietly behind a spinner and its log is shown
+  only on failure — and the download renders a single progress bar instead of
+  the multi-line transfer table.
 
 ### Fixed
 
 - **Complete uninstall.** `memory-archive uninstall` now removes the
   `memory-archive` CLI launcher and any update-installed `lib/`, leaving no
-  orphaned files.
+  orphaned files. It also uninstalls the Python distribution under its real name
+  (`ma-app`), so the package is no longer left behind in site-packages.
+- **`memory-archive update` reinstalls the Python package.** The updater matched
+  the bundled wheel by an outdated name and silently skipped the Python package;
+  it now matches by extension, as the installers do.
+- **Windows installer parity.** `install.ps1` now resolves the latest release via
+  the GitHub redirect (honouring `GITHUB_TOKEN`) instead of the rate-limited API,
+  and invokes pip through the interpreter correctly so the `memory-archive` CLI
+  installs on Windows.
 - The generated `INSTALL.md` installs the bundled wheel with a name-agnostic
   glob.
 

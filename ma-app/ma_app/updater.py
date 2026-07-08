@@ -37,8 +37,13 @@ RELEASES_API = (
 # ma-proto is a compile-time library — it has no standalone binary.
 RUST_BINARIES = ["ma-core", "ma-kafka-producer"]
 
-# pip distribution name — what `pip install` / `pip uninstall` recognises.
-PIP_PACKAGE_NAME = "memory-archive"
+# Names this tool is known by. These are DIFFERENT and must not be conflated:
+#   - the pip distribution (what `pip show` / `pip uninstall` recognise) is
+#     "ma-app" — see ma-app/pyproject.toml `name`;
+#   - the CLI launcher installed on PATH is the `memory-archive` entry-point
+#     script (pyproject `[project.scripts]`).
+PIP_DIST_NAME    = "ma-app"
+CLI_COMMAND_NAME = "memory-archive"
 
 # Config directory written by ma-core at first run.
 CONFIG_DIR = Path.home() / ".memory-archive"
@@ -156,7 +161,7 @@ def _download_with_curl(url: str, dest: Path) -> None:
     """
     curl = shutil.which("curl") or shutil.which("curl.exe")
     if curl:
-        cmd = [curl, "-fL", "-o", str(dest)]
+        cmd = [curl, "-fL", "--progress-bar", "-o", str(dest)]
         token = os.environ.get("GITHUB_TOKEN")
         if token:
             cmd += ["-H", f"Authorization: Bearer {token}",
@@ -327,17 +332,31 @@ def _pip_install_wheel(whl: Path, bin_dir: Path) -> bool:
     lib_dir  = ma_home / "lib"
     lib_dir.mkdir(parents=True, exist_ok=True)
 
-    result = subprocess.run(
-        [
-            sys.executable, "-m", "pip", "install",
-            "--prefix", str(lib_dir),
-            "--no-warn-script-location",
-            "--upgrade",
-            str(whl),
-        ],
-        check=False,
-    )
+    # pip's resolver output ("Requirement already satisfied" lines) is captured
+    # and surfaced only on failure so it does not flood the display; a Rich
+    # status spinner shows liveness while pip runs.
+    with _console.status(f"[cyan]Reinstalling {whl.name} …", spinner="dots"):
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "pip", "install",
+                "--prefix", str(lib_dir),
+                "--no-warn-script-location",
+                "--disable-pip-version-check",
+                "--quiet",
+                "--upgrade",
+                str(whl),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
     if result.returncode != 0:
+        out = (result.stdout or "").rstrip()
+        err = (result.stderr or "").rstrip()
+        if out:
+            _console.print(out)
+        if err:
+            _console.print(f"[red]{err}[/red]")
         return False
 
     # Copy the entry point into bin_dir so only one directory is on PATH.
@@ -501,14 +520,13 @@ def _update_command(
         archive_path = tmp_dir / artifact
 
         _console.print(f"\nDownloading {artifact} …")
-        _console.print("")    # blank line before curl's progress table
+        _console.print("")    # blank line before the progress bar
 
         _download_with_curl(download_url, archive_path)
 
-        _console.print("")    # blank line after progress table
         size_mb = archive_path.stat().st_size / (1024 * 1024)
         _console.print(
-            f"[green]  [OK] Download complete ({size_mb:.1f} MB)[/green]"
+            f"[green]  [OK] Downloaded ({size_mb:.1f} MB)[/green]"
         )
 
         # 5b. Verify artifact integrity before touching its contents.
@@ -562,14 +580,16 @@ def _update_command(
 
             _console.print(f"[green]  [OK] Updated {src_name}[/green]")
 
-        # 8. Reinstall Python wheel (ma-app)
-        whl_matches = list(extract_dir.glob("memory_archive-*.whl"))
+        # 8. Reinstall Python wheel (ma-app). The archive ships one wheel named
+        # ma_app-<ver>-...whl; match by extension (as install.sh does) so a
+        # distribution rename can never silently skip the Python update.
+        whl_matches = list(extract_dir.glob("*.whl"))
         if whl_matches:
             whl = whl_matches[0]
-            _console.print(f"\nReinstalling {whl.name} …")
+            _console.print("")   # spacing before the Python package step
             if _pip_install_wheel(whl, bin_dir):
                 _console.print(
-                    f"[green]  [OK] {PIP_PACKAGE_NAME} updated[/green]"
+                    f"[green]  [OK] {PIP_DIST_NAME} updated[/green]"
                 )
             else:
                 _console.print(
@@ -663,7 +683,7 @@ def _uninstall_command(
     # INSTALL_DIR alongside the binaries; that copy is not tracked by pip, so it
     # must be discovered and removed explicitly, or the command stays on PATH
     # after uninstall.
-    removable_names = [*RUST_BINARIES, PIP_PACKAGE_NAME]
+    removable_names = [*RUST_BINARIES, CLI_COMMAND_NAME]
 
     # Check the computed install dir AND every directory on PATH so we catch
     # installs done outside the default location and *all* copies of a launcher
@@ -725,7 +745,7 @@ def _uninstall_command(
     _console.print("")
     _console.print("[yellow bold]  Python package:[/yellow bold]")
     pip_check = subprocess.run(
-        [sys.executable, "-m", "pip", "show", PIP_PACKAGE_NAME],
+        [sys.executable, "-m", "pip", "show", PIP_DIST_NAME],
         capture_output=True, text=True, check=False,
     )
     pip_installed = pip_check.returncode == 0
@@ -735,9 +755,9 @@ def _uninstall_command(
             None,
         )
         location = location_line.split(":", 1)[1].strip() if location_line else "unknown"
-        _console.print(f"    - {PIP_PACKAGE_NAME}  (installed at {location})")
+        _console.print(f"    - {PIP_DIST_NAME}  (installed at {location})")
     else:
-        _console.print(f"    - {PIP_PACKAGE_NAME} not found via pip")
+        _console.print(f"    - {PIP_DIST_NAME} not found via pip")
 
     _console.print("")
     _console.print("[yellow bold]  Program files:[/yellow bold]")
@@ -853,26 +873,26 @@ def _uninstall_command(
 
     # 7. Uninstall Python package via pip
     if pip_installed:
-        _console.print(f"\n  Uninstalling Python package ({PIP_PACKAGE_NAME}) …")
+        _console.print(f"\n  Uninstalling Python package ({PIP_DIST_NAME}) …")
         result = subprocess.run(
             [
                 sys.executable, "-m", "pip", "uninstall",
-                "--yes", "--quiet", PIP_PACKAGE_NAME,
+                "--yes", "--quiet", PIP_DIST_NAME,
             ],
             check=False,
         )
         if result.returncode == 0:
-            removed.append(PIP_PACKAGE_NAME)
+            removed.append(PIP_DIST_NAME)
             _console.print(
-                f"[green]  [OK] pip uninstall {PIP_PACKAGE_NAME}[/green]"
+                f"[green]  [OK] pip uninstall {PIP_DIST_NAME}[/green]"
             )
         else:
             failed.append(
-                (PIP_PACKAGE_NAME, f"pip uninstall exited {result.returncode}")
+                (PIP_DIST_NAME, f"pip uninstall exited {result.returncode}")
             )
             _console.print(
                 f"[yellow]  [!!] pip uninstall failed (exit {result.returncode}).\n"
-                f"       Run manually: pip uninstall {PIP_PACKAGE_NAME}[/yellow]"
+                f"       Run manually: pip uninstall {PIP_DIST_NAME}[/yellow]"
             )
 
     # 8. Remove documentation directory

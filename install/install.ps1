@@ -115,6 +115,69 @@ function Invoke-Die([string]$Message) {
     exit 1
 }
 
+# Run a native command while showing an in-place spinner, capturing its stdout
+# and stderr so they do not flood the styled installer display. The captured
+# output is surfaced only if the command fails.
+#   Usage: Invoke-WithSpinner "running message" "done message" <exe> @(args...)
+# Returns the command's exit code. On an interactive console an animated spinner
+# is drawn in place; otherwise the command runs silently and its log is printed
+# only on failure.
+$script:SPINNER_FRAMES = @('|', '/', '-', '\')
+function Invoke-WithSpinner {
+    param(
+        [string]  $RunMessage,
+        [string]  $DoneMessage,
+        [string]  $FilePath,
+        [string[]]$ArgumentList
+    )
+
+    $log = Join-Path $TMP_DIR "spinner.log"
+
+    # Run the command in a background job via the call operator (&) so argument
+    # quoting is preserved on both Windows PowerShell 5.1 and PowerShell 7
+    # (Start-Process naively space-joins its ArgumentList, which corrupts paths
+    # containing spaces). All command streams are redirected to a log; the job's
+    # only pipeline output is $LASTEXITCODE.
+    $job = Start-Job -ScriptBlock {
+        param($exe, $a, $logPath)
+        & $exe @a *> $logPath
+        $LASTEXITCODE
+    } -ArgumentList $FilePath, $ArgumentList, $log
+
+    $interactive = $false
+    try { $interactive = -not [System.Console]::IsOutputRedirected } catch { $interactive = $false }
+    if ($interactive) { try { [System.Console]::CursorVisible = $false } catch {} }
+
+    $i = 0
+    while ($job.State -eq "Running") {
+        if ($interactive) {
+            $frame = $script:SPINNER_FRAMES[$i++ % $script:SPINNER_FRAMES.Length]
+            Write-Host ("`r  {0}  {1}" -f $frame, $RunMessage) -NoNewline -ForegroundColor Cyan
+        }
+        Start-Sleep -Milliseconds 100
+    }
+
+    $rc = Receive-Job $job
+    Remove-Job $job -Force
+    if ($null -eq $rc) { $rc = 1 }   # job failed before reporting an exit code
+    $rc = [int]$rc
+
+    if ($interactive) {
+        Write-Host ("`r" + (" " * ($RunMessage.Length + 6)) + "`r") -NoNewline
+        try { [System.Console]::CursorVisible = $true } catch {}
+    }
+
+    if ($rc -eq 0) {
+        Write-Ok $DoneMessage
+    } else {
+        Write-Err "$RunMessage — failed"
+        if (Test-Path $log) {
+            Get-Content -LiteralPath $log | ForEach-Object { Write-Host "    $_" }
+        }
+    }
+    return $rc
+}
+
 # Returns $true if a command is found on PATH, $false otherwise.
 function Test-Command([string]$Name) {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
@@ -254,25 +317,56 @@ function Invoke-CheckDependencies {
 function Invoke-GetLatestRelease {
     Write-Step "Fetching latest release information"
 
-    # Use Invoke-RestMethod (the same cmdlet `irm` is aliased to) for the
-    # lightweight API query — it parses JSON automatically.
-    $headers = @{
-        "Accept"               = "application/vnd.github+json"
-        "X-GitHub-Api-Version" = "2022-11-28"
+    $script:RELEASE_TAG = $null
+
+    # Primary: resolve the latest tag from github.com's redirect rather than the
+    # Releases API. /releases/latest 302-redirects to /releases/tag/<TAG>; with
+    # -L curl.exe follows it and -w reports the final URL, which carries the tag.
+    # This path is NOT subject to the api.github.com 60-req/hr unauthenticated
+    # rate limit, so it succeeds even when that quota is exhausted.
+    $resolvedUrl = & $script:CURL_BIN -fsSLI -o NUL -w "%{url_effective}" "$REPO_URL/releases/latest" 2>$null
+    if ($LASTEXITCODE -eq 0 -and $resolvedUrl) {
+        $resolvedUrl = ($resolvedUrl | Out-String).Trim()
+        if ($resolvedUrl -match "/releases/tag/([^/\s]+)") {
+            $script:RELEASE_TAG = $Matches[1]
+        }
     }
 
-    try {
-        $release = Invoke-RestMethod -Uri $RELEASES_API -Headers $headers -ErrorAction Stop
-    } catch {
-        Invoke-Die "Failed to reach GitHub API: $_`nCheck your internet connection."
-    }
+    # Fallback: the Releases API. Reached only if the redirect yielded no tag.
+    # Honours GITHUB_TOKEN to lift the limit from 60 to 5000 req/hr, and
+    # distinguishes rate-limiting from real network faults.
+    if (-not $script:RELEASE_TAG) {
+        $headers = @{
+            "Accept"               = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+        }
+        if ($env:GITHUB_TOKEN) { $headers["Authorization"] = "Bearer $($env:GITHUB_TOKEN)" }
 
-    $script:RELEASE_TAG   = $release.tag_name
-    $script:DOWNLOAD_URL  = "$REPO_URL/releases/download/$($script:RELEASE_TAG)/$ARTIFACT_NAME"
+        try {
+            $release = Invoke-RestMethod -Uri $RELEASES_API -Headers $headers -ErrorAction Stop
+            $script:RELEASE_TAG = $release.tag_name
+        } catch {
+            $status = $null
+            try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+            if ($status -eq 403 -or $status -eq 429) {
+                Write-Err "GitHub API rate limit exceeded (HTTP $status)."
+                Write-Info "This is a rate limit, not a network fault. Options:"
+                Write-Info "  - wait for the hourly reset, or retry from a different network/IP"
+                Write-Info "  - re-run with a token:  `$env:GITHUB_TOKEN='<token>'; irm <url> | iex"
+                exit 1
+            } elseif ($status -eq 404) {
+                Invoke-Die "No published release found for $REPO_OWNER/$REPO_NAME (HTTP 404). The repository may have only drafts or pre-releases."
+            } else {
+                Invoke-Die "Failed to reach GitHub API: $_`nCheck your internet connection."
+            }
+        }
+    }
 
     if (-not $script:RELEASE_TAG) {
-        Invoke-Die "Could not parse release tag from GitHub API response."
+        Invoke-Die "Could not determine the latest release tag."
     }
+
+    $script:DOWNLOAD_URL = "$REPO_URL/releases/download/$($script:RELEASE_TAG)/$ARTIFACT_NAME"
 
     Write-Ok "Latest release: $($script:RELEASE_TAG)"
     Write-Info "Download URL : $($script:DOWNLOAD_URL)"
@@ -285,29 +379,23 @@ function Invoke-GetLatestRelease {
 function Invoke-DownloadPackage {
     Write-Step "Downloading $ARTIFACT_NAME"
 
-    Write-Host ""   # blank line before the curl progress meter
+    Write-Host ""   # blank line before the progress bar
 
     $destFile = Join-Path $TMP_DIR $ARTIFACT_NAME
 
-    # curl.exe renders the same transfer-stats table as on Linux / macOS:
-    #
-    #   % Total    % Received % Xferd  Average Speed   Time    Time    Time  Current
-    #                                  Dload  Upload   Total   Spent   Left  Speed
-    #  100 37.2M  100 37.2M    0     0  2483k      0  0:00:15  0:00:15 ...
-    #
-    # Flags:
+    # --progress-bar renders a single self-updating bar instead of the default
+    # multi-line transfer table, keeping the display clean.
     #   -f  fail on HTTP 4xx/5xx
     #   -L  follow redirects (GitHub releases redirect to CDN)
     #   -o  write to named file (suppresses body going to stdout)
     #
-    & $script:CURL_BIN -fL -o $destFile $script:DOWNLOAD_URL
+    & $script:CURL_BIN -fL --progress-bar -o $destFile $script:DOWNLOAD_URL
     if ($LASTEXITCODE -ne 0) {
         Invoke-Die "Download failed (exit code $LASTEXITCODE).`nURL: $($script:DOWNLOAD_URL)"
     }
 
-    Write-Host ""   # blank line after progress meter
-    $sizeKB = [math]::Round((Get-Item $destFile).Length / 1MB, 1)
-    Write-Ok "Download complete: ${sizeKB} MB"
+    $sizeMB = [math]::Round((Get-Item $destFile).Length / 1MB, 1)
+    Write-Ok "Downloaded (${sizeMB} MB)"
 }
 
 # =============================================================================
@@ -382,12 +470,8 @@ function Invoke-ExtractPackage {
     Expand-Archive -LiteralPath $zipPath -DestinationPath $script:EXTRACT_DIR -Force `
         -ErrorAction Stop
 
-    Write-Ok "Extracted to $($script:EXTRACT_DIR)"
-    Write-Info "Archive contents:"
-    Get-ChildItem $script:EXTRACT_DIR | ForEach-Object {
-        $size = if ($_.PSIsContainer) { "<dir>" } else { "$([math]::Round($_.Length/1KB,1)) KB" }
-        Write-Info ("  {0,-40} {1}" -f $_.Name, $size)
-    }
+    $fileCount = @(Get-ChildItem -LiteralPath $script:EXTRACT_DIR -File).Count
+    Write-Ok "Extracted ($fileCount components)"
 }
 
 # =============================================================================
@@ -417,19 +501,30 @@ function Invoke-InstallComponents {
                -ErrorAction SilentlyContinue | Select-Object -First 1
 
     if ($whl -and $script:PIP_BIN) {
-        Write-Info "Installing Python package from $($whl.Name) ..."
+        # Resolve the interpreter path so pip is invoked as "<python> -m pip …".
+        # ($script:PIP_BIN is the "<python> -m pip" display string used only for
+        # messages; it cannot be passed to the call operator directly.)
+        $pythonPath = (Get-Command $script:PYTHON_BIN -ErrorAction SilentlyContinue).Source
+        if (-not $pythonPath) { $pythonPath = $script:PYTHON_BIN }
 
         # Install normally so pip handles the entry point and sys.path correctly.
         $userFlag = if ($IsAdmin) { @() } else { @("--user") }
-        & $script:PIP_BIN -m pip install @userFlag $whl.FullName
 
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "pip install returned exit code $LASTEXITCODE."
-            Write-Warn "Run manually: $($script:PIP_BIN) -m pip install $userFlag '$($whl.FullName)'"
+        # pip's own resolver output ("Requirement already satisfied" lines) is
+        # captured by Invoke-WithSpinner and surfaced only on failure, so it does
+        # not flood the display. --quiet trims it further; on a fresh machine that
+        # still downloads wheels, the spinner shows liveness.
+        $pipArgs = @('-m', 'pip', 'install') + $userFlag +
+                   @('--quiet', '--disable-pip-version-check', '--no-input', $whl.FullName)
+        $pipRc = Invoke-WithSpinner "Installing ma-app (Python CLI)" "Installed ma-app (Python CLI)" `
+                     $pythonPath $pipArgs
+
+        if ($pipRc -ne 0) {
+            Write-Warn "Run manually: $($script:PIP_BIN) install $(if (-not $IsAdmin) { '--user ' })'$($whl.FullName)'"
         } else {
             # Ask Python where it put the Scripts directory for this install mode.
             $sysScheme = if ($IsAdmin) { "nt" } else { "nt_user" }
-            $epDir = & $script:PIP_BIN -c "import sysconfig; print(sysconfig.get_path('scripts', '$sysScheme'))"
+            $epDir = & $script:PYTHON_BIN -c "import sysconfig; print(sysconfig.get_path('scripts', '$sysScheme'))"
             $epSrc = Join-Path $epDir "memory-archive.exe"
             if (Test-Path $epSrc) {
                 Copy-Item -LiteralPath $epSrc -Destination (Join-Path $INSTALL_DIR "memory-archive.exe") -Force
@@ -499,6 +594,8 @@ function Invoke-UpdatePath {
 # =============================================================================
 
 function Invoke-Cleanup {
+    # Restore the cursor in case a spinner was interrupted mid-frame.
+    try { [System.Console]::CursorVisible = $true } catch {}
     if (Test-Path $TMP_DIR) {
         Remove-Item -LiteralPath $TMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
     }

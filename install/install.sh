@@ -63,6 +63,10 @@ else
     CLR_YELLOW="" CLR_RED="" CLR_DIM=""
 fi
 
+# Spinner animation frames (Braille). Used by run_spinner for long-running,
+# output-heavy steps whose native output would otherwise flood the display.
+readonly _SPINNER_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+
 # ============================================================================
 # 2. HELPER FUNCTIONS
 # ============================================================================
@@ -121,6 +125,50 @@ print_error() {
 die() {
     print_error "$*"
     exit 1
+}
+
+# Run a command while showing an in-place spinner, capturing its output so it
+# does not flood the styled installer display. Only surfaces the captured
+# output if the command fails.
+#   Usage: run_spinner "running message" "done message" command [args...]
+# Returns the command's exit status. On an interactive stderr an animated
+# spinner is drawn in place; otherwise the command runs silently and its log is
+# printed only on failure.
+run_spinner() {
+    local run_msg="$1" done_msg="$2"; shift 2
+    local log="${TMP_DIR}/spinner.log"
+
+    if [[ ! -t 2 ]]; then
+        local rc=0
+        "$@" >"${log}" 2>&1 || rc=$?
+        if [[ ${rc} -eq 0 ]]; then
+            print_ok "${done_msg}"
+        else
+            print_error "${run_msg} — failed"
+            cat "${log}" >&2
+        fi
+        return ${rc}
+    fi
+
+    "$@" >"${log}" 2>&1 &
+    local pid=$! i=0
+    printf '\033[?25l' >&2                        # hide cursor
+    while kill -0 "${pid}" 2>/dev/null; do
+        printf '\r  %b%s%b  %s' \
+            "${CLR_CYAN}" "${_SPINNER_FRAMES[i++ % ${#_SPINNER_FRAMES[@]}]}" \
+            "${CLR_RESET}" "${run_msg}" >&2
+        sleep 0.1
+    done
+    local rc=0
+    wait "${pid}" || rc=$?
+    printf '\r\033[K\033[?25h' >&2                 # clear line, restore cursor
+    if [[ ${rc} -eq 0 ]]; then
+        print_ok "${done_msg}"
+    else
+        print_error "${run_msg} — failed"
+        cat "${log}" >&2
+    fi
+    return ${rc}
 }
 
 # Returns 0 if the named command exists on PATH, 1 otherwise.
@@ -351,25 +399,22 @@ get_latest_release() {
 download_package() {
     print_step "Downloading ${ARTIFACT_NAME}"
 
-    # Emit a blank line so the curl progress meter starts on its own line.
+    # Emit a blank line so the progress bar starts on its own line.
     echo "" >&2
 
-    # Download with curl's default transfer stats (the clean tabular display
-    # the user sees when piping to bash).  We deliberately do NOT pass -s
-    # (silent) here — the progress meter prints to stderr, which is always
-    # visible even in a pipe.
+    # --progress-bar renders a single self-updating bar (to stderr) instead of
+    # the default multi-line transfer table, keeping the display clean.
     #
     #   -f  : fail on HTTP 4xx/5xx (avoids saving an HTML error page)
     #   -L  : follow redirects (GitHub releases redirect to cdn)
     #   -o  : write to a named file instead of stdout
     #
-    curl -fL \
+    curl -fL --progress-bar \
          -o "${TMP_DIR}/${ARTIFACT_NAME}" \
          "${DOWNLOAD_URL}" \
     || die "Download failed.  URL: ${DOWNLOAD_URL}"
 
-    echo "" >&2
-    print_ok "Download complete: $(du -sh "${TMP_DIR}/${ARTIFACT_NAME}" | cut -f1)"
+    print_ok "Downloaded ($(du -sh "${TMP_DIR}/${ARTIFACT_NAME}" | cut -f1))"
 }
 
 # ============================================================================
@@ -438,11 +483,9 @@ extract_package() {
     tar -xzf "${TMP_DIR}/${ARTIFACT_NAME}" -C "${EXTRACT_DIR}" --no-same-owner \
     || die "Failed to extract ${ARTIFACT_NAME}.  The archive may be corrupt."
 
-    print_ok "Extracted to ${EXTRACT_DIR}"
-    print_info "Archive contents:"
-    ls -lh "${EXTRACT_DIR}" | tail -n +2 | while IFS= read -r line; do
-        print_info "  ${line}"
-    done
+    local file_count
+    file_count="$(find "${EXTRACT_DIR}" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+    print_ok "Extracted (${file_count} components)"
 }
 
 # ============================================================================
@@ -482,14 +525,19 @@ install_components() {
     whl="$(ls "${EXTRACT_DIR}"/*.whl 2>/dev/null | head -1 || true)"
 
     if [[ -n "${whl}" && -n "${PIP_BIN}" ]]; then
-        print_info "Installing Python package from ${whl##*/} …"
-
         # Install normally so pip handles the shebang and sys.path correctly.
         # --user ensures it goes into the user's site-packages, not a prefix
         # that breaks imports at runtime.
         local user_flag=""
         [[ "${EUID:-$(id -u)}" -ne 0 ]] && user_flag="--user"
-        ${PIP_BIN} install ${user_flag} "${whl}" \
+
+        # pip's own resolver/output (dozens of "Requirement already satisfied"
+        # lines) is captured by run_spinner and surfaced only on failure, so it
+        # does not flood the display. --quiet trims it further; on a fresh
+        # machine that still downloads wheels, the spinner shows liveness.
+        run_spinner "Installing ma-app (Python CLI)" "Installed ma-app (Python CLI)" \
+            ${PIP_BIN} install ${user_flag} \
+                --quiet --disable-pip-version-check --no-input "${whl}" \
         || die "pip install failed.  Run manually: ${PIP_BIN} install ${user_flag} '${whl}'"
 
         # Ask pip where it put the entry point, then copy it into INSTALL_DIR.
@@ -575,6 +623,8 @@ update_path() {
 
 cleanup() {
     # Registered as an EXIT trap so it runs even on error.
+    # Restore the cursor in case a spinner was interrupted mid-frame.
+    [[ -t 2 ]] && printf '\033[?25h' >&2
     if [[ -d "${TMP_DIR:-}" ]]; then
         rm -rf "${TMP_DIR}"
     fi
