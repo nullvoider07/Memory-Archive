@@ -289,6 +289,20 @@ pub enum InboundMessage {
 
     /// Admin: list all registered annotators with live claim counts.
     ListAnnotators,
+
+    /// Admin: permanently delete a session from everywhere — the Redis Hash, all
+    /// index sets (status, by_os, by_mode), any claim, all storage objects, and
+    /// the local memory directory. Irreversible.
+    ///
+    /// `force` is required to delete a session that is still `active` or
+    /// `annotating`; without it such sessions are rejected as in-flight.
+    /// If the session Hash is already gone, the delete still sweeps orphaned
+    /// index/claim entries and any storage under the session id.
+    DeleteSession {
+        session_id: String,
+        #[serde(default)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -535,6 +549,19 @@ pub enum OutboundMessage {
 
     /// Response to PricingRegistryStatus.
     PricingStatusAck,
+
+    /// Response to DeleteSession — the session was purged.
+    /// `redis_removed` is true if a session Hash existed and was deleted;
+    /// `storage_objects_removed` counts storage objects deleted (0 for a
+    /// local-mode session, whose files live in the memory directory);
+    /// `local_dir_removed` is true if a local memory directory was removed.
+    SessionDeleted {
+        session_id: String,
+        memory_name: String,
+        redis_removed: bool,
+        storage_objects_removed: usize,
+        local_dir_removed: bool,
+    },
 
     /// Generic error response.
     Error {

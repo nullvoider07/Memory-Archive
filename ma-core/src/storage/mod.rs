@@ -16,6 +16,25 @@ use tokio::sync::Mutex;
 
 use crate::config::Config;
 
+/// Reject a session id that could escape or denote the storage root before it is
+/// used to build a destructive filesystem/object path. An empty id is the most
+/// dangerous case: `storage_path.join("")` resolves to the storage root itself,
+/// so an unguarded `delete_all("")` would remove *every* session. Path
+/// separators, `.`/`..`, and absolute paths are rejected as traversal.
+pub fn validate_session_id(session_id: &str) -> Result<()> {
+    if session_id.is_empty()
+        || session_id == "."
+        || session_id == ".."
+        || session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id.contains("..")
+        || std::path::Path::new(session_id).is_absolute()
+    {
+        anyhow::bail!("invalid session id for storage operation: {session_id:?}");
+    }
+    Ok(())
+}
+
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
     async fn put(
@@ -31,6 +50,23 @@ pub trait StorageBackend: Send + Sync {
     async fn list(&self, session_id: &str, prefix: &str) -> Result<Vec<String>>;
 
     async fn delete(&self, session_id: &str, relative_path: &str) -> Result<()>;
+
+    /// Delete every object belonging to a session and return how many were removed.
+    ///
+    /// Default implementation lists the session with an empty prefix and deletes
+    /// each entry — correct for the object stores (S3/Azure/GCP), whose objects
+    /// all sit under `sessions/{session_id}/`. `LocalBackend` overrides this to
+    /// remove the session directory tree in one call.
+    async fn delete_all(&self, session_id: &str) -> Result<usize> {
+        validate_session_id(session_id)?;
+        let paths = self.list(session_id, "").await?;
+        let mut removed = 0usize;
+        for rel in &paths {
+            self.delete(session_id, rel).await?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
 }
 
 pub struct LocalBackend {
@@ -103,6 +139,23 @@ impl StorageBackend for LocalBackend {
             tokio::fs::remove_file(&path).await?;
         }
         Ok(())
+    }
+
+    async fn delete_all(&self, session_id: &str) -> Result<usize> {
+        // Guard first: an empty or traversal session id would resolve to (or
+        // escape) the storage root and remove unrelated sessions.
+        validate_session_id(session_id)?;
+        // Local objects live under storage_path/{session_id}. In local mode this
+        // proxy directory often does not exist (captures live in the memory
+        // directory instead), so a missing directory is not an error.
+        let dir = self.storage_path.join(session_id);
+        if !dir.exists() {
+            return Ok(0);
+        }
+        let count = self.list(session_id, "").await.map(|v| v.len()).unwrap_or(0);
+        tokio::fs::remove_dir_all(&dir).await
+            .with_context(|| format!("Failed to remove session dir: {}", dir.display()))?;
+        Ok(count)
     }
 }
 
@@ -993,5 +1046,54 @@ async fn build_single_backend_from_flat(config: &Config) -> (String, Arc<dyn Sto
             "local".to_string(),
             Arc::new(LocalBackend::new(&config.storage_path)) as Arc<dyn StorageBackend>,
         ),
+    }
+}
+
+#[cfg(test)]
+mod local_backend_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn delete_all_removes_session_tree_and_counts() {
+        let root = std::env::temp_dir().join(format!("ma-store-{}", uuid::Uuid::new_v4()));
+        let session_id = "sess-abc";
+        let backend = LocalBackend::new(&root.to_string_lossy());
+
+        backend.put(session_id, "metadata.json", b"{}".to_vec(), "application/json").await.unwrap();
+        backend.put(session_id, "vision/frames/a.webp", b"x".to_vec(), "image/webp").await.unwrap();
+        backend.put(session_id, "vision/frames/b.webp", b"y".to_vec(), "image/webp").await.unwrap();
+
+        let session_dir = root.join(session_id);
+        assert!(session_dir.exists());
+
+        let removed = backend.delete_all(session_id).await.unwrap();
+        assert_eq!(removed, 3, "should count the three stored files");
+        assert!(!session_dir.exists(), "session directory should be gone");
+
+        // Second call is a no-op on a missing directory.
+        let removed_again = backend.delete_all(session_id).await.unwrap();
+        assert_eq!(removed_again, 0);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn delete_all_refuses_empty_or_traversal_id_and_preserves_root() {
+        let root = std::env::temp_dir().join(format!("ma-store-guard-{}", uuid::Uuid::new_v4()));
+        let backend = LocalBackend::new(&root.to_string_lossy());
+        // Populate two sibling sessions under the root.
+        backend.put("sess-1", "a.txt", b"1".to_vec(), "text/plain").await.unwrap();
+        backend.put("sess-2", "b.txt", b"2".to_vec(), "text/plain").await.unwrap();
+        assert!(root.exists());
+
+        // An empty id would resolve to the storage root — must be refused, and the
+        // root and its sessions must remain intact.
+        assert!(backend.delete_all("").await.is_err(), "empty id must be rejected");
+        assert!(backend.delete_all("..").await.is_err(), "'..' must be rejected");
+        assert!(backend.delete_all("a/b").await.is_err(), "separators must be rejected");
+        assert!(root.join("sess-1").exists(), "root sessions must survive a rejected delete");
+        assert!(root.join("sess-2").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

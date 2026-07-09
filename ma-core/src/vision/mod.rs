@@ -33,7 +33,9 @@ pub fn decide(event: &CommandEvent, press_delay_ms: u64, type_delay_ms: u64) -> 
 
     match event.action_type.as_str() {
         "mouse" => match event.action_subtype.as_str() {
-            "left" | "right" | "double" => FetchDecision::FetchAt { mark: true },
+            // "move" marks the destination cursor position — the useful training
+            // signal for "move cursor to X" steps.
+            "left" | "right" | "double" | "move" => FetchDecision::FetchAt { mark: true },
             _ => FetchDecision::Skip { reason: "mouse subtype does not trigger fetch" },
         },
         "keyboard" => match event.action_subtype.as_str() {
@@ -521,6 +523,11 @@ mod tests {
     #[test]
     fn test_mouse_double_fetches_and_marks() {
         assert_eq!(decide(&ev("mouse", "double", true), 500, 1000), FetchDecision::FetchAt { mark: true });
+    }
+
+    #[test]
+    fn test_mouse_move_fetches_and_marks() {
+        assert_eq!(decide(&ev("mouse", "move", true), 500, 1000), FetchDecision::FetchAt { mark: true });
     }
 
     #[test]

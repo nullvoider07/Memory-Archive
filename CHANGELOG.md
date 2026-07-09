@@ -3,6 +3,40 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] — 2026-07-09
+
+Session-lifecycle and capture-fidelity release: a first-class session-delete
+command, cursor-move frame capture, and an annotation TUI display fix.
+
+### Added
+
+- **`memory-archive session delete`.** Permanently purges a session from
+  everywhere in one command: the Redis record, every status index set,
+  `sessions:by_os:*` / `sessions:by_mode:*`, and `claim:{id}`; all stored files
+  (cloud objects under `sessions/{id}/…` and the local memory directory,
+  including any `(incomplete)` sibling from `mark_incomplete`); and the
+  client-side temp/scratch directory. Deleting a stale ID whose Redis record has
+  already expired still sweeps orphaned index/claim entries and leftover storage,
+  so it also serves as an orphan cleaner. Active or annotating sessions are
+  refused unless `--force` is passed. Implemented as an admin-only IPC operation
+  (`DeleteSession`) — annotator TCP connections reject it via the existing
+  authority catch-alls.
+- **Cursor-move frames.** `mouse/move` steps now capture before/at/after
+  screenshots with the cursor marked at the destination position, giving
+  "move cursor to X" steps the visual context useful for CUA training instead of
+  being frameless. Scroll and other mouse subtypes remain frameless by design.
+  Applies to sessions captured on 0.12.0 and later.
+
+### Fixed
+
+- **Annotation TUI image pane.** Steps that are frameless by design (e.g. cursor
+  moves in pre-0.12.0 sessions, scrolls) no longer render the alarming
+  `✗ Image not found` / `No image available`; they read `No screenshot for this
+  action`. The Open button label is now always reset on image-bearing steps, so
+  navigating from a frameless step no longer leaves a stale "No image available"
+  label, and the fullscreen external viewer is enabled on Windows
+  (`os.startfile`) as well as Linux/macOS.
+
 ## [0.11.0] — 2026-07-08
 
 Supply-chain and network-default hardening release, with an installer/updater

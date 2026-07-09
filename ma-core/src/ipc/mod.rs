@@ -1697,6 +1697,115 @@ async fn handle_message(
             }
         }
 
+        InboundMessage::DeleteSession { session_id, force } => {
+            use crate::registry::schema::SessionStatus;
+
+            // A session id is always a UUID generated at registration. Reject
+            // anything else — most importantly an empty id, which would make the
+            // storage purge resolve to the storage root and delete every session.
+            if uuid::Uuid::parse_str(&session_id).is_err() {
+                return OutboundMessage::Error {
+                    code: "INVALID_SESSION_ID".to_string(),
+                    message: format!("'{session_id}' is not a valid session id."),
+                };
+            }
+
+            match registry.get(&session_id).await {
+                Ok(record) => {
+                    // Refuse to delete an in-flight session unless forced.
+                    if matches!(record.status, SessionStatus::Active | SessionStatus::Annotating)
+                        && !force
+                    {
+                        return OutboundMessage::Error {
+                            code: "SESSION_IN_FLIGHT".to_string(),
+                            message: format!(
+                                "Session '{session_id}' is '{}' — finish it (done/release) or pass \
+                                 force to delete anyway.",
+                                record.status
+                            ),
+                        };
+                    }
+
+                    // For a forced delete of an active session, drop the watch-loop
+                    // handles first so it cannot rewrite files after the purge.
+                    if record.status == SessionStatus::Active {
+                        let _ = done_handles.lock().await.remove(&session_id);
+                        let _ = push_handles.lock().await.remove(&session_id);
+                    }
+
+                    let redis_removed = match registry.delete_session(&session_id, Some(&record)).await {
+                        Ok(v) => v,
+                        Err(e) => return OutboundMessage::Error {
+                            code: "DELETE_FAILED".to_string(),
+                            message: format!("Redis purge failed: {e}"),
+                        },
+                    };
+
+                    let storage = storage_router.resolve_for_session(&record);
+                    let storage_objects_removed = storage.delete_all(&session_id).await
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(session_id = %session_id, "DeleteSession: storage purge failed: {e}");
+                            0
+                        });
+
+                    let local_dir_removed = crate::session::purge_memory_dir(&record.memory_path)
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(session_id = %session_id, "DeleteSession: local dir purge failed: {e}");
+                            false
+                        });
+
+                    tracing::info!(
+                        session_id = %session_id,
+                        memory_name = %record.memory_name,
+                        storage_objects_removed,
+                        local_dir_removed,
+                        "Session deleted"
+                    );
+
+                    OutboundMessage::SessionDeleted {
+                        session_id,
+                        memory_name: record.memory_name,
+                        redis_removed,
+                        storage_objects_removed,
+                        local_dir_removed,
+                    }
+                }
+                Err(_) => {
+                    // Hash already gone — sweep orphaned index/claim entries and any
+                    // storage still keyed under this session id. memory_name is
+                    // unknown, so the local memory directory cannot be located.
+                    let redis_removed = match registry.delete_session(&session_id, None).await {
+                        Ok(v) => v,
+                        Err(e) => return OutboundMessage::Error {
+                            code: "DELETE_FAILED".to_string(),
+                            message: format!("Redis orphan sweep failed: {e}"),
+                        },
+                    };
+
+                    let storage = storage_router.resolve("").1;
+                    let storage_objects_removed = storage.delete_all(&session_id).await
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(session_id = %session_id, "DeleteSession: orphan storage purge failed: {e}");
+                            0
+                        });
+
+                    tracing::info!(
+                        session_id = %session_id,
+                        storage_objects_removed,
+                        "Session orphan entries swept (no Hash present)"
+                    );
+
+                    OutboundMessage::SessionDeleted {
+                        session_id,
+                        memory_name: String::new(),
+                        redis_removed,
+                        storage_objects_removed,
+                        local_dir_removed: false,
+                    }
+                }
+            }
+        }
+
         InboundMessage::AnnotatorAuth { .. }
         | InboundMessage::ListAnnotationQueue
         | InboundMessage::ClaimSession { .. }

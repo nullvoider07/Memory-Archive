@@ -311,18 +311,30 @@ class ImageReview(Widget, can_focus=True):
                 self._set_label("img-type", action)
 
                 btn = self.query_one("#open-btn", Button)
-                _can_open = _HAS_FEH or _HAS_OPEN
+                _can_open = _HAS_FEH or _HAS_OPEN or _IS_WINDOWS
                 btn.disabled = not _can_open
-                if not _can_open:
-                    btn.label = "no image viewer available"
+                # Always set the label so it never carries over a stale
+                # "No image available" from a previously viewed frameless step.
+                btn.label = "Open fullscreen" if _can_open else "no image viewer available"
+            elif not step.image_path:
+                # Frameless by design — this action type never captures a screenshot
+                # (cursor moves, scroll, non-type/press keys). Not an error.
+                self._set_label("img-icon", "—")
+                self._set_label("img-filename", "No screenshot for this action")
+                self._set_label("img-dims", "")
+                self._set_label("img-type", f"{step.action_type} / {step.action_subtype}")
+                btn = self.query_one("#open-btn", Button)
+                btn.disabled = True
+                btn.label = "no screenshot for this step"
             else:
+                # A frame was expected but is not present yet (fetching) or missing.
                 self._set_label("img-icon", "↓" if self._fetching else "✗")
-                self._set_label("img-filename", "Image not found" + (" (fetching…)" if self._fetching else ""))
+                self._set_label("img-filename", "Fetching…" if self._fetching else "Image not found")
                 self._set_label("img-dims", "")
                 self._set_label("img-type", "")
                 btn = self.query_one("#open-btn", Button)
                 btn.disabled = True
-                btn.label = "No image available"
+                btn.label = "fetching…" if self._fetching else "image unavailable"
 
         except NoMatches:
             pass

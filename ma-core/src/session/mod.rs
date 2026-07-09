@@ -92,6 +92,34 @@ pub fn mark_incomplete(memory_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Permanently remove a session's local memory directory and its
+/// "(incomplete)"-suffixed sibling (produced by `mark_incomplete`).
+///
+/// Used by session deletion. In local mode captures live at
+/// `storage_path/{memory_name}` (the record's `memory_path`), which is distinct
+/// from the `storage_path/{session_id}` proxy tree handled by `LocalBackend`.
+///
+/// Returns `true` if at least one directory was removed. A missing directory is
+/// not an error.
+pub fn purge_memory_dir(memory_path: &str) -> anyhow::Result<bool> {
+    let mut removed = false;
+    let primary = Path::new(memory_path);
+    if primary.exists() {
+        std::fs::remove_dir_all(primary)
+            .with_context(|| format!("Failed to remove memory directory: {}", primary.display()))?;
+        removed = true;
+    }
+
+    let incomplete = PathBuf::from(format!("{memory_path} (incomplete)"));
+    if incomplete.exists() {
+        std::fs::remove_dir_all(&incomplete)
+            .with_context(|| format!("Failed to remove memory directory: {}", incomplete.display()))?;
+        removed = true;
+    }
+
+    Ok(removed)
+}
+
 // Internal helper to build the initial SessionMetadata from the SessionRecord
 fn build_initial_metadata(record: &SessionRecord) -> SessionMetadata {
     SessionMetadata {
@@ -130,5 +158,32 @@ fn build_initial_metadata(record: &SessionRecord) -> SessionMetadata {
         fallback_model_endpoint: record.fallback_model_endpoint.clone(),
         capture_server_addr: record.capture_server_addr.clone(),
         the_eyes_addr: record.the_eyes_addr.clone(),
+    }
+}
+
+#[cfg(test)]
+mod purge_tests {
+    use super::purge_memory_dir;
+
+    #[test]
+    fn purges_primary_and_incomplete_siblings() {
+        let base = std::env::temp_dir().join(format!("ma-mem-{}", uuid::Uuid::new_v4()));
+        let primary = base.join("my-memory");
+        let incomplete = base.join("my-memory (incomplete)");
+        std::fs::create_dir_all(primary.join("vision/frames")).unwrap();
+        std::fs::write(primary.join("metadata.json"), b"{}").unwrap();
+        std::fs::create_dir_all(&incomplete).unwrap();
+        std::fs::write(incomplete.join("metadata.json"), b"{}").unwrap();
+
+        let removed = purge_memory_dir(&primary.to_string_lossy()).unwrap();
+        assert!(removed, "should report a directory was removed");
+        assert!(!primary.exists(), "primary memory dir should be gone");
+        assert!(!incomplete.exists(), "(incomplete) sibling should be gone");
+
+        // No-op when nothing is present.
+        let removed_again = purge_memory_dir(&primary.to_string_lossy()).unwrap();
+        assert!(!removed_again);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -6,17 +6,14 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.11.0  
+**Version:** 0.12.0  
 **Last Updated:** July 2026  
 **Developer:** Kartik (NullVoider)
 
-> **🔒 What's new in 0.11.0** — supply-chain and network-default hardening:
-> - **Verified installs.** `install.sh`, `install.ps1`, and `memory-archive update` download a `SHA256SUMS` manifest and verify each release archive before extracting it; a missing or mismatched checksum aborts the install.
-> - **Safe extraction.** Release archives are unpacked with per-member path-traversal guards — absolute paths, `..`, and destination-escaping symlinks are rejected.
-> - **Metrics endpoint fails closed.** The Prometheus endpoint now binds `127.0.0.1` by default (new `observability.metrics_bind_addr`). Binding a non-loopback address requires `observability.metrics_token`; without it, ma-core falls back to loopback and logs a CRITICAL rather than exposing unauthenticated metrics.
-> - **Config file permissions.** `config.json` (which may hold an annotator key) is written `0600`, parent dir `0700`.
-> - **Resilient installer.** `install.sh` resolves the latest version via the GitHub release redirect rather than the rate-limited API; if you do hit the API (its fallback, or `memory-archive update`), set `GITHUB_TOKEN` to raise the limit.
-> - **Cleaner uninstall.** `memory-archive uninstall` removes the `memory-archive` CLI launcher and any update-installed `lib/`, leaving no trace.
+> **✨ What's new in 0.12.0** — session lifecycle and capture-fidelity improvements:
+> - **`memory-archive session delete`.** A first-class command to purge a session from everywhere: the Redis record plus every status/`by_os`/`by_mode` index set and its claim, all stored files (cloud objects and the local memory directory, including any `(incomplete)` sibling). Deleting a stale ID whose Redis record has already expired still sweeps orphaned index/claim entries and leftover storage. Active/annotating sessions require `--force`.
+> - **Cursor-move frames.** `mouse/move` steps now capture before/at/after screenshots with the cursor marked at the destination, so "move cursor to X" steps carry visual context instead of being frameless. Applies to sessions captured on 0.12.0 and later.
+> - **Annotation TUI display fix.** The image pane no longer shows an alarming `✗ Image not found` for steps that are frameless by design — it reads `No screenshot for this action`. Navigating from a frameless step to an image-bearing one no longer leaves a stale "No image available" label on the Open button, and the fullscreen viewer is now enabled on Windows.
 
 > **📖 Documentation in progress** — Extended documentation covering in-depth deployment guides, architecture deep-dives, and operational runbooks for research teams, AI labs, and enterprise users is currently being written and will be published separately. This README serves as the primary reference in the meantime.
 >
@@ -782,6 +779,31 @@ SESSION_ID=$(memory-archive session register \
   --capture-server eyes-01 \
   --actuation-server cc-01 \
   --memory-name "fill-web-form")
+```
+
+---
+
+### `memory-archive session delete`
+
+Permanently purge a session from everywhere. Removes the Redis record and every index/claim entry (`session:{id}`, all status sets, `sessions:by_os:*`, `sessions:by_mode:*`, `claim:{id}`), all stored files (cloud objects under `sessions/{id}/…` and the local memory directory plus any `(incomplete)` sibling), and the client-side temp/scratch directory. This cannot be undone.
+
+If the Redis record has already expired, the command still sweeps orphaned index/claim entries and any leftover storage, so it doubles as a cleaner for stale sessions. Active or annotating sessions are refused unless `--force` is given.
+
+```
+memory-archive session delete [OPTIONS]
+
+Options:
+  -s, --session  TEXT  Session ID to delete  [required]
+  -y, --yes            Skip the confirmation prompt
+      --force          Delete even if the session is active or being annotated
+```
+
+```bash
+# Delete a session, with confirmation
+memory-archive session delete --session "$SESSION_ID"
+
+# Force-delete an in-flight session without prompting
+memory-archive session delete --session "$SESSION_ID" --force --yes
 ```
 
 ---

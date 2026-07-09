@@ -8,4 +8,6 @@ __pycache__/
 
 # Local-only artifacts (not shipped in the repo)
 /tests/
-/AUDIT-0.11.0.md
+AUDIT-*.md
+REVIEW.md
+*.log

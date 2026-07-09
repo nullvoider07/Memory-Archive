@@ -9,7 +9,7 @@ from rich.console import Console
 try:
     from ma_app import __version__
 except ImportError:
-    __version__ = "0.11.0"
+    __version__ = "0.12.0"
 
 app = typer.Typer(
     name="memory-archive",
@@ -457,6 +457,93 @@ def session_register(
     except (IPCError, ValueError) as e:
         console.print(f"[red]Registration failed: {e}[/red]")
         raise typer.Exit(code=1)
+
+
+@session_app.command("delete")
+def session_delete(
+    session: str = typer.Option(..., "--session", "-s", help="Session ID to delete"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+    force: bool = typer.Option(False, "--force", help="Delete even if the session is active or being annotated"),
+) -> None:
+    """Permanently delete a session from everywhere.
+
+    Removes the Redis record and all index/claim entries, every stored file
+    (cloud objects and the local memory directory). This cannot be undone.
+    If the Redis record is already gone, it still sweeps orphaned index entries
+    and any remaining storage.
+    """
+    from ma_app.ipc.client import IPCClient, IPCError
+    from ma_app.config.settings import Settings
+
+    session = session.strip()
+    if not session:
+        console.print("[red]A non-empty --session id is required.[/red]")
+        raise typer.Exit(code=1)
+
+    # Best-effort lookup so the confirmation prompt shows what will be removed.
+    # A missing record is not fatal — a stale session with no Redis Hash can still
+    # be purged of orphaned index/claim entries and leftover storage.
+    record: dict = {}
+    try:
+        with IPCClient() as client:
+            status_resp = client.send({"type": "get_session_status", "session_id": session})
+        record = status_resp.get("session", {})
+    except IPCError as e:
+        if "SESSION_NOT_FOUND" not in str(e):
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=1)
+
+    if record:
+        console.print(f"\n[bold]Delete session {session}[/bold]")
+        console.print(f"  memory_name : {record.get('memory_name', '?')}")
+        console.print(f"  status      : {record.get('status', '?')}")
+        console.print(f"  total_steps : {record.get('total_steps', '?')}")
+        console.print(f"  memory_path : {record.get('memory_path', '?')}")
+    else:
+        console.print(
+            f"\n[yellow]No registry record found for {session}.[/yellow] "
+            "Proceeding will sweep any orphaned index/claim entries and leftover storage."
+        )
+
+    if not yes:
+        confirmed = typer.confirm(
+            "This permanently removes the Redis record and ALL stored files. Continue?"
+        )
+        if not confirmed:
+            console.print("[yellow]Aborted — nothing deleted.[/yellow]")
+            raise typer.Exit(code=1)
+
+    try:
+        with IPCClient() as client:
+            response = client.send({
+                "type": "delete_session",
+                "session_id": session,
+                "force": force,
+            })
+    except IPCError as e:
+        console.print(f"[red]{e}[/red]")
+        if "SESSION_IN_FLIGHT" in str(e):
+            console.print("[dim]Pass --force to delete it anyway.[/dim]")
+        raise typer.Exit(code=1)
+
+    if response.get("type") != "session_deleted":
+        console.print(f"[red]Unexpected response: {response}[/red]")
+        raise typer.Exit(code=1)
+
+    # Best-effort cleanup of client-side temp dirs (cloud_primary scratch + remote img_cache).
+    try:
+        settings = Settings.load()
+        temp_root = Path(settings.temp_session_dir) / session
+        if temp_root.exists():
+            import shutil as _shutil
+            _shutil.rmtree(temp_root, ignore_errors=True)
+    except Exception:
+        pass
+
+    console.print(f"\n[green]Session deleted: {session}[/green]")
+    console.print(f"  redis record removed : {response.get('redis_removed', False)}")
+    console.print(f"  storage objects      : {response.get('storage_objects_removed', 0)}")
+    console.print(f"  local dir removed    : {response.get('local_dir_removed', False)}")
 
 
 # Top-level subcommands

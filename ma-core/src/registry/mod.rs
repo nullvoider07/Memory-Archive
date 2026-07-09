@@ -410,6 +410,79 @@ impl SessionRegistry {
         Ok(removed)
     }
 
+    /// Permanently remove a session from Redis: the Hash, every status/OS/mode
+    /// index set it could belong to, and its claim key.
+    ///
+    /// SREM is issued against all index sets defensively (not just the current
+    /// status set) so orphaned memberships — e.g. a session id left in
+    /// `sessions:by_mode:manual` after its Hash expired — are cleaned up in the
+    /// same pass. When `record` is provided the exact OS/mode sets are targeted;
+    /// when it is `None` (Hash already gone) all OS and mode sets are swept.
+    ///
+    /// Returns `true` if a session Hash existed and was deleted.
+    pub async fn delete_session(
+        &mut self,
+        session_id: &str,
+        record: Option<&SessionRecord>,
+    ) -> anyhow::Result<bool> {
+        if session_id.is_empty() {
+            anyhow::bail!("delete_session called with an empty session id");
+        }
+        let key = session_key(session_id);
+
+        // Delete the Hash. DEL returns the number of keys removed.
+        let hash_removed: u64 = self.conn.del(&key).await.context("DEL session hash failed")?;
+
+        // Remove from every status index set (defensive — cleans orphans too).
+        for set in [
+            "sessions:active",
+            "sessions:pending",
+            "sessions:pending_human_annotation",
+            "sessions:annotating",
+            "sessions:pending_compilation",
+            "sessions:reasoning_degraded",
+        ] {
+            let _: () = self.conn.srem(set, session_id).await
+                .with_context(|| format!("SREM {set} failed"))?;
+        }
+
+        // Remove from OS and mode index sets.
+        match record {
+            Some(r) => {
+                let os_key = os_index_key(&r.os_type);
+                let _: () = self.conn.srem(&os_key, session_id).await
+                    .with_context(|| format!("SREM {os_key} failed"))?;
+                let mode_key = mode_index_key(&r.mode);
+                let _: () = self.conn.srem(&mode_key, session_id).await
+                    .with_context(|| format!("SREM {mode_key} failed"))?;
+            }
+            None => {
+                for os in ["LINUX", "WINDOWS", "MACOS"] {
+                    let os_key = os_index_key(os);
+                    let _: () = self.conn.srem(&os_key, session_id).await
+                        .with_context(|| format!("SREM {os_key} failed"))?;
+                }
+                for mode in [SessionMode::Manual, SessionMode::Automated] {
+                    let mode_key = mode_index_key(&mode);
+                    let _: () = self.conn.srem(&mode_key, session_id).await
+                        .with_context(|| format!("SREM {mode_key} failed"))?;
+                }
+            }
+        }
+
+        // Remove any outstanding claim.
+        let claim_key = format!("claim:{session_id}");
+        let _: () = self.conn.del(&claim_key).await.context("DEL claim failed")?;
+
+        tracing::info!(
+            session_id = %session_id,
+            hash_removed = hash_removed > 0,
+            "Session purged from registry"
+        );
+
+        Ok(hash_removed > 0)
+    }
+
     // Annotator credential registry
 
     /// Return all fields of an annotator's Redis Hash, or None if not found.
@@ -1005,5 +1078,44 @@ mod tests {
         assert!(in_mode, "Should be in sessions:by_mode:manual");
 
         cleanup(&mut registry, &id).await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_session_purges_hash_and_indexes() {
+        let mut registry = SessionRegistry::connect(TEST_REDIS_URL)
+            .await
+            .expect("Redis must be running");
+
+        let id = format!("test-{}", uuid::Uuid::new_v4());
+        let record = test_record(&id);
+
+        registry.register(&record).await.expect("register failed");
+        // Add a claim so we can confirm it is removed too.
+        let _: () = registry.conn.set(format!("claim:{id}"), "annot-x:claim-y").await.unwrap();
+
+        let existed = registry
+            .delete_session(&id, Some(&record))
+            .await
+            .expect("delete_session failed");
+        assert!(existed, "delete_session should report the hash existed");
+
+        let hash_exists: bool = registry.conn.exists(session_key(&id)).await.unwrap();
+        let in_active: bool = registry.conn.sismember("sessions:active", &id).await.unwrap();
+        let in_os: bool = registry.conn.sismember("sessions:by_os:LINUX", &id).await.unwrap();
+        let in_mode: bool = registry.conn.sismember("sessions:by_mode:manual", &id).await.unwrap();
+        let claim_exists: bool = registry.conn.exists(format!("claim:{id}")).await.unwrap();
+
+        assert!(!hash_exists, "session Hash should be gone");
+        assert!(!in_active, "should be removed from sessions:active");
+        assert!(!in_os, "should be removed from sessions:by_os:LINUX");
+        assert!(!in_mode, "should be removed from sessions:by_mode:manual");
+        assert!(!claim_exists, "claim key should be gone");
+
+        // Second delete is a no-op orphan sweep and reports the hash was absent.
+        let existed_again = registry
+            .delete_session(&id, None)
+            .await
+            .expect("second delete_session failed");
+        assert!(!existed_again, "second delete should report no hash existed");
     }
 }
