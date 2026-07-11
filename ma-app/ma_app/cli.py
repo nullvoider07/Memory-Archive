@@ -9,7 +9,7 @@ from rich.console import Console
 try:
     from ma_app import __version__
 except ImportError:
-    __version__ = "0.12.0"
+    __version__ = "0.13.0"
 
 app = typer.Typer(
     name="memory-archive",
@@ -152,6 +152,12 @@ def annotator_claim(
                 compiler_result = CompilerApp(claimed_session_id, memory_md_path).run()
                 if compiler_result == "complete":
                     finalize_memory(claimed_session_id, memory_md_path, console)
+                elif compiler_result == "quit":
+                    console.print(
+                        "[yellow]Exited compile without finalizing.[/yellow] The session is "
+                        "left at pending_compilation — resume with:\n"
+                        f"  memory-archive compile --session {claimed_session_id}"
+                    )
     finally:
         if worker_active:
             shutdown_worker()
@@ -787,6 +793,12 @@ def annotate(
                 compiler_result = CompilerApp(session, memory_md_path).run()
                 if compiler_result == "complete":
                     finalize_memory(session, memory_md_path, console)
+                elif compiler_result == "quit":
+                    console.print(
+                        "[yellow]Exited compile without finalizing.[/yellow] The session is "
+                        "left at pending_compilation — resume with:\n"
+                        f"  memory-archive compile --session {session}"
+                    )
     finally:
         if worker_active:
             shutdown_worker()
@@ -813,6 +825,12 @@ def compile(
             compiler_result = CompilerApp(session, memory_md_path).run()
             if compiler_result == "complete":
                 finalize_memory(session, memory_md_path, console)
+            elif compiler_result == "quit":
+                console.print(
+                    "[yellow]Exited compile without finalizing.[/yellow] The session is "
+                    "left at pending_compilation — resume with:\n"
+                    f"  memory-archive compile --session {session}"
+                )
     finally:
         if worker_active:
             shutdown_worker()

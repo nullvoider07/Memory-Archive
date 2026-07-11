@@ -6,14 +6,16 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.12.0  
+**Version:** 0.13.0  
 **Last Updated:** July 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.12.0** — session lifecycle and capture-fidelity improvements:
-> - **`memory-archive session delete`.** A first-class command to purge a session from everywhere: the Redis record plus every status/`by_os`/`by_mode` index set and its claim, all stored files (cloud objects and the local memory directory, including any `(incomplete)` sibling). Deleting a stale ID whose Redis record has already expired still sweeps orphaned index/claim entries and leftover storage. Active/annotating sessions require `--force`.
-> - **Cursor-move frames.** `mouse/move` steps now capture before/at/after screenshots with the cursor marked at the destination, so "move cursor to X" steps carry visual context instead of being frameless. Applies to sessions captured on 0.12.0 and later.
-> - **Annotation TUI display fix.** The image pane no longer shows an alarming `✗ Image not found` for steps that are frameless by design — it reads `No screenshot for this action`. Navigating from a frameless step to an image-bearing one no longer leaves a stale "No image available" label on the Open button, and the fullscreen viewer is now enabled on Windows.
+> **✨ What's new in 0.13.0** — capture fidelity and crash recovery:
+> - **Frames for every mouse interaction.** All mouse subtypes now capture before/at/after screenshots with the cursor marked at the acted-on position — clicks (`left`/`right`/`double`/`middle`/`triple`), `move`, `drag`, `hold`/`release`, and `scroll`. Previously only left/right/double/move did, so hold, release, drag, middle, triple, and scroll steps were recorded frameless. Applies to sessions captured on 0.13.0 and later.
+> - **Interrupted annotations survive a restart.** An annotation session that was interrupted by an unclean ma-core exit (power cut, reboot) is no longer demoted to `complete` and locked out of `memory-archive annotate`. The startup reconcile sweep now restores it to `pending_annotation` so the TUI resumes from where you left off.
+> - **Explicit finalize at the compile stage.** The memory.md editor now has a dedicated `Ctrl+D` to finalize (save → confirm → mark the session complete). `Ctrl+Q` no longer finalizes — it exits leaving the session at `pending_compilation`, resumable with `memory-archive compile`, and the saved draft (notes/edge-cases) is preserved on resume rather than regenerated.
+>
+> Earlier in 0.12.0: the `memory-archive session delete` command, cursor-move frames, and the annotation TUI display fix.
 
 > **📖 Documentation in progress** — Extended documentation covering in-depth deployment guides, architecture deep-dives, and operational runbooks for research teams, AI labs, and enterprise users is currently being written and will be published separately. This README serves as the primary reference in the meantime.
 >

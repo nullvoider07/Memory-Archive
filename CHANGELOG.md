@@ -3,6 +3,60 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] — 2026-07-11
+
+Capture-fidelity and crash-recovery release: drag-interaction frames, an explicit
+compile-stage finalize key, and a fix for interrupted annotations being locked out
+after a restart.
+
+### Added
+
+- **Explicit `Ctrl+D` to finalize a memory.** The compile-stage editor now has a
+  dedicated finalize action: `Ctrl+D` saves, asks for confirmation, and marks the
+  session `complete`. Previously the only way out of the editor was `Ctrl+Q`, which
+  silently finalized — the same keystroke that means "quit without saving progress"
+  during annotation. See the matching change to `Ctrl+Q` below.
+
+- **Frames for every mouse interaction.** All mouse subtypes now capture
+  before/at/after screenshots with the cursor marked at the acted-on position:
+  the click point for `left`/`right`/`double`/`middle`/`triple`, the destination
+  for `move` and `drag` (which reports its endpoint as the captured position), the
+  press/release point for `hold`/`release`, and the pointer position for
+  `scroll_up`/`scroll_down`. Previously only `left`/`right`/`double`/`move`
+  captured frames, so `hold`, `release`, `drag`, `middle`, `triple`, and scroll
+  steps were frameless and landed in the corpus without visual context — leaving
+  drag-and-drop, press-and-hold, and scroll interactions incompletely recorded.
+  `vision::decide` now fetches for the whole `mouse` action type via a catch-all,
+  so any future mouse subtype is captured rather than silently dropped. (The
+  `position` action type is a cursor-position query, not a state-changing action,
+  and stays frameless.) Applies to sessions captured on 0.13.0 and later.
+
+### Changed
+
+- **`Ctrl+Q` at the compile stage no longer finalizes.** It now saves, confirms,
+  and exits leaving the session at `pending_compilation` — resumable with
+  `memory-archive compile` — mirroring what `Ctrl+Q` already means during
+  annotation (exit without completing). Finalizing is now solely `Ctrl+D`. To
+  support lossless resume, `run_compile` no longer overwrites an existing
+  `memory.md`: a resumed compile reopens the saved draft (with its notes and
+  edge-cases) instead of regenerating a blank scaffold. Delete `memory.md` to force
+  a fresh scaffold.
+
+### Fixed
+
+- **Interrupted annotations are resumable after a restart.** The startup
+  reconcile sweep mirrored `metadata.json`'s `status` into Redis, but that field
+  is frozen at `complete` once capture finishes and never tracks the
+  annotation/compilation lifecycle. An `annotating` session that survived an
+  unclean ma-core exit (power cut, reboot) was therefore demoted to `complete`,
+  after which `memory-archive annotate` refused to load it
+  (`INVALID_STATUS`). The sweep now trusts the live Redis status when metadata
+  reads `complete`: an interrupted annotation is restored to `pending_annotation`
+  so the TUI resumes from `reasoning.jsonl`, while `pending_compilation` and
+  `reasoning_degraded` sessions are left untouched. Metadata is mirrored only when
+  it carries a genuine resumable status (cloud-primary Kafka-replay crash
+  recovery).
+
 ## [0.12.0] — 2026-07-09
 
 Session-lifecycle and capture-fidelity release: a first-class session-delete

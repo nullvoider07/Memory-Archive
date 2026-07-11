@@ -96,15 +96,27 @@ class CompilerApp(App):
     """
     Memory Archive compiler TUI — wraps the memory.md editor screen.
 
-    Pushes CompilerScreen on mount. Exits with result='complete' when
-    the user saves and closes the editor.
+    Pushes CompilerScreen on mount. Exits with result='complete' when the user
+    finalizes (Ctrl+D), or result='quit' when the user exits without finalizing
+    (Ctrl+Q) — in which case the session stays resumable at pending_compilation.
     """
 
     CSS_PATH = None
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("ctrl+q", "quit_editor", "Quit", show=False),
-        Binding("ctrl+s", "save", "Save", show=False),
+        Binding("ctrl+s", "save",        "Save",     show=False),
+        Binding("ctrl+d", "finalize",    "Finalize", show=False),
+        Binding("ctrl+q", "quit_editor", "Quit",     show=False),
     ]
+
+    def action_finalize(self) -> None:
+        try:
+            screen = self.screen
+            if hasattr(screen, "action_finalize"):
+                screen.action_finalize()
+            else:
+                self.exit(result="complete")
+        except Exception:
+            self.exit(result="complete")
 
     def action_quit_editor(self) -> None:
         try:
@@ -112,9 +124,9 @@ class CompilerApp(App):
             if hasattr(screen, "action_quit_editor"):
                 screen.action_quit_editor()
             else:
-                self.exit(result="complete")
+                self.exit(result="quit")
         except Exception:
-            self.exit(result="complete")
+            self.exit(result="quit")
 
     def action_save(self) -> None:
         try:

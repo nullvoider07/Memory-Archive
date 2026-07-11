@@ -35,6 +35,7 @@ class CompilerStatusBar(Widget):
         yield Label("", id="compiler-status-left")
         yield Label(
             "[#5865f2]Ctrl+S[/#5865f2] Save  "
+            "[#22c55e]Ctrl+D[/#22c55e] Finalize  "
             "[#5865f2]Ctrl+Q[/#5865f2] Quit",
             id="compiler-status-right",
         )
@@ -62,18 +63,20 @@ class CompilerStatusBar(Widget):
 
 
 class CompilerQuitOverlay(ModalScreen):
-    """Unsaved changes on quit. Dismissed with 'save', 'discard', or None (cancel)."""
+    """Confirm quitting the compile stage without finalizing.
+
+    Dismissed with 'quit' (exit, session stays resumable) or None (cancel).
+    """
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "cancel", show=False),
-        Binding("s",      "save",   show=False),
-        Binding("d",      "discard", show=False),
+        Binding("q",      "quit",   show=False),
     ]
 
     DEFAULT_CSS = """
     CompilerQuitOverlay { align: center middle; }
     #cq-box {
-        width: 52; height: auto;
+        width: 60; height: auto;
         background: #1a1d27; border: round #f59e0b; padding: 1 2;
     }
     #cq-title {
@@ -90,34 +93,89 @@ class CompilerQuitOverlay(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Widget(id="cq-box"):
-            yield Label("Unsaved edits", id="cq-title")
+            yield Label("Quit compilation", id="cq-title")
             yield Label(
-                "memory.md has unsaved changes.\n"
-                "Save before closing?",
+                "Your draft is saved. The session is left incomplete and can be\n"
+                "resumed later with  memory-archive compile.  It is not finalized.",
                 id="cq-body",
             )
             with Widget(id="cq-buttons"):
-                yield Button("Save & exit  [s]",  id="btn-save",    variant="success")
-                yield Button("Discard  [d]",       id="btn-discard", variant="error")
-                yield Button("Cancel  [Esc]",      id="btn-cancel",  variant="primary")
+                yield Button("Quit  [q]",     id="btn-quit",   variant="warning")
+                yield Button("Cancel  [Esc]", id="btn-cancel", variant="primary")
 
     def on_mount(self) -> None:
         try:
-            self.query_one("#btn-save", Button).focus()
+            self.query_one("#btn-cancel", Button).focus()
         except NoMatches:
             pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        mapping = {
-            "btn-save":    "save",
-            "btn-discard": "discard",
-            "btn-cancel":  None,
+        mapping: dict[str, str | None] = {
+            "btn-quit":   "quit",
+            "btn-cancel": None,
         }
         self.dismiss(mapping.get(event.button.id or "", None))
 
-    def action_save(self)    -> None: self.dismiss("save")
-    def action_discard(self) -> None: self.dismiss("discard")
-    def action_cancel(self)  -> None: self.dismiss("discard")
+    def action_quit(self)   -> None: self.dismiss("quit")
+    def action_cancel(self) -> None: self.dismiss(None)
+
+
+class CompilerFinalizeOverlay(ModalScreen):
+    """Confirm finalizing the memory.
+
+    Dismissed with 'finalize' (mark the session complete) or None (cancel).
+    """
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("escape", "cancel",   show=False),
+        Binding("f",      "finalize", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    CompilerFinalizeOverlay { align: center middle; }
+    #cf-box {
+        width: 60; height: auto;
+        background: #1a1d27; border: round #22c55e; padding: 1 2;
+    }
+    #cf-title {
+        width: 1fr; content-align: center middle;
+        text-style: bold; color: #22c55e; margin-bottom: 1;
+    }
+    #cf-body  { width: 1fr; color: #e2e8f0; margin-bottom: 1; }
+    #cf-buttons {
+        width: 1fr; height: auto;
+        layout: horizontal; align: center middle;
+    }
+    #cf-buttons Button { margin: 0 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Widget(id="cf-box"):
+            yield Label("Finalize memory", id="cf-title")
+            yield Label(
+                "This marks the session complete and locks it (90-day retention).\n"
+                "You will not be able to edit it again. Finalize now?",
+                id="cf-body",
+            )
+            with Widget(id="cf-buttons"):
+                yield Button("Finalize  [f]", id="btn-finalize", variant="success")
+                yield Button("Cancel  [Esc]", id="btn-cancel",   variant="primary")
+
+    def on_mount(self) -> None:
+        try:
+            self.query_one("#btn-cancel", Button).focus()
+        except NoMatches:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        mapping: dict[str, str | None] = {
+            "btn-finalize": "finalize",
+            "btn-cancel":   None,
+        }
+        self.dismiss(mapping.get(event.button.id or "", None))
+
+    def action_finalize(self) -> None: self.dismiss("finalize")
+    def action_cancel(self)   -> None: self.dismiss(None)
 
 
 class CompilerScreen(Screen):
@@ -126,12 +184,16 @@ class CompilerScreen(Screen):
 
     Pre-populated with the scaffolded draft from T4.2.
     Ctrl+S atomically saves to disk.
-    Ctrl+Q prompts if unsaved changes, then exits with result='complete'.
+    Ctrl+D finalizes: saves, confirms, then exits with result='complete'.
+    Ctrl+Q quits without finalizing: saves, confirms, then exits with
+    result='quit' — the session stays at pending_compilation and is resumable
+    with `memory-archive compile`.
     """
 
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("ctrl+s", "save",     "Save",  show=False),
-        Binding("ctrl+q", "quit_editor", "Quit", show=False),
+        Binding("ctrl+s", "save",        "Save",     show=False),
+        Binding("ctrl+d", "finalize",    "Finalize", show=False),
+        Binding("ctrl+q", "quit_editor", "Quit",     show=False),
     ]
 
     DEFAULT_CSS = """
@@ -191,23 +253,27 @@ class CompilerScreen(Screen):
     def action_save(self) -> None:
         self._do_save()
 
+    def action_finalize(self) -> None:
+        # Persist the current buffer, then confirm before finalizing — finalizing
+        # marks the session complete and locks it, so it must be deliberate.
+        self._do_save()
+        self.app.push_screen(CompilerFinalizeOverlay(), self._on_finalize_choice)
+
+    def _on_finalize_choice(self, choice: str | None = None) -> None:
+        if choice == "finalize":
+            self.app.exit(result="complete")
+        # choice == None means Cancel — stay in the editor, unfinalized
+
     def action_quit_editor(self) -> None:
-        try:
-            current = self.query_one("#memory-editor", TextArea).text
-        except NoMatches:
-            self.app.exit(result="complete")
-            return
-        if current.rstrip() != self._saved_text.rstrip():
-            self.app.push_screen(CompilerQuitOverlay(), self._on_quit_choice)
-        else:
-            self.app.exit(result="complete")
+        # Quit without finalizing. The draft is saved (autosave + this save), so the
+        # session stays resumable at pending_compilation. Confirm to avoid an
+        # accidental exit.
+        self._do_save()
+        self.app.push_screen(CompilerQuitOverlay(), self._on_quit_choice)
 
     def _on_quit_choice(self, choice: str | None = None) -> None:
-        if choice == "save":
-            self._do_save()
-            self.app.exit(result="complete")
-        elif choice == "discard":
-            self.app.exit(result="complete")
+        if choice == "quit":
+            self.app.exit(result="quit")
         # choice == None means Cancel — do nothing, user stays in editor
 
     def _do_save(self) -> None:

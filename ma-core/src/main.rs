@@ -13,6 +13,44 @@ mod storage;
 mod tls;
 mod vision;
 
+/// Decide the recovery status for a stale in-flight session found by the reconcile
+/// sweep on startup. `redis_status` is the live status from Redis (one of
+/// Annotating / PendingCompilation / ReasoningDegraded); `metadata_status` is the
+/// `status` string from metadata.json. Returns `Some(target)` to update Redis, or
+/// `None` to leave the session as-is.
+///
+/// metadata.json.status is frozen at "complete" by `mark_complete()` once capture
+/// ends, so in local mode it does not track the annotation/compilation
+/// sub-lifecycle. It is authoritative only when it carries a genuine resumable
+/// status (cloud-primary crash recovery via Kafka replay writes one through
+/// `mark_recovered`). When it reads "complete", the live Redis status is trusted and
+/// the intended resumable state is restored: an interrupted annotation returns to
+/// `pending_annotation`; `pending_compilation` and `reasoning_degraded` are already
+/// resumable and are left untouched.
+fn reconcile_target(
+    redis_status: &registry::schema::SessionStatus,
+    metadata_status: &str,
+) -> Option<registry::schema::SessionStatus> {
+    use registry::schema::SessionStatus;
+    if metadata_status == "complete" {
+        match redis_status {
+            SessionStatus::Annotating => Some(SessionStatus::PendingAnnotation),
+            _ => None,
+        }
+    } else if redis_status.to_string() == metadata_status {
+        None
+    } else {
+        match metadata_status {
+            "pending_annotation" => Some(SessionStatus::PendingAnnotation),
+            "pending_human_annotation" => Some(SessionStatus::PendingHumanAnnotation),
+            "pending_compilation" => Some(SessionStatus::PendingCompilation),
+            "reasoning_degraded" => Some(SessionStatus::ReasoningDegraded),
+            "incomplete" => Some(SessionStatus::Incomplete),
+            _ => None,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
@@ -296,8 +334,17 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Reconcile sweep — fix Redis/metadata.json mismatches for annotating
-    // and pending_compilation sessions left stale by a prior unclean exit.
+    // Reconcile sweep — recover annotating / pending_compilation /
+    // reasoning_degraded sessions left stale in Redis by a prior unclean exit.
+    //
+    // metadata.json.status is frozen at "complete" by mark_complete() when capture
+    // finishes; in local mode it never tracks the annotation/compilation
+    // sub-lifecycle, which lives only in Redis. Mirroring it back into Redis would
+    // demote every interrupted in-flight session to "complete" and make it
+    // un-resumable. So metadata is treated as authoritative only when it carries a
+    // genuine resumable status (cloud-primary crash recovery via Kafka replay writes
+    // one through mark_recovered); when it reads "complete", the Redis status is
+    // trusted and the intended resumable state is restored instead.
     let stale_candidates = {
         let mut ids = Vec::new();
         if let Ok(v) = registry.list_annotating().await { ids.extend(v); }
@@ -329,22 +376,16 @@ async fn main() -> anyhow::Result<()> {
                 Err(_) => continue,
             }
         };
-        if record.status.to_string() == meta.status {
-            continue;
-        }
-        let target = match meta.status.as_str() {
-            "complete"                  => registry::schema::SessionStatus::Complete,
-            "pending_annotation"        => registry::schema::SessionStatus::PendingAnnotation,
-            "pending_human_annotation"  => registry::schema::SessionStatus::PendingHumanAnnotation,
-            "pending_compilation"       => registry::schema::SessionStatus::PendingCompilation,
-            "reasoning_degraded"        => registry::schema::SessionStatus::ReasoningDegraded,
-            _ => continue,
+        let target = match reconcile_target(&record.status, &meta.status) {
+            Some(t) => t,
+            None => continue,
         };
         tracing::warn!(
             session_id = %session_id,
             redis_status = %record.status,
             metadata_status = %meta.status,
-            "Reconcile sweep: Redis/metadata mismatch — correcting"
+            recovered_status = %target,
+            "Reconcile sweep: recovering stale in-flight session to a resumable status"
         );
         if let Err(e) = registry.update_status(&session_id, target).await {
             tracing::error!(session_id = %session_id, "Reconcile sweep: update failed: {e}");
@@ -499,4 +540,60 @@ async fn main() -> anyhow::Result<()> {
     ipc_handle.await??;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::reconcile_target;
+    use crate::registry::schema::SessionStatus;
+
+    // The bug this fixes: metadata.json.status is frozen at "complete" after
+    // capture, so a session interrupted mid-annotation must NOT be demoted to
+    // Complete — it must be recovered to PendingAnnotation so the TUI can resume.
+    #[test]
+    fn annotating_with_complete_metadata_recovers_to_pending_annotation() {
+        assert_eq!(
+            reconcile_target(&SessionStatus::Annotating, "complete"),
+            Some(SessionStatus::PendingAnnotation),
+        );
+    }
+
+    // pending_compilation / reasoning_degraded are already resumable; a frozen
+    // "complete" metadata must leave them untouched (None = no Redis write).
+    #[test]
+    fn in_flight_non_annotating_with_complete_metadata_is_left_untouched() {
+        assert_eq!(reconcile_target(&SessionStatus::PendingCompilation, "complete"), None);
+        assert_eq!(reconcile_target(&SessionStatus::ReasoningDegraded, "complete"), None);
+    }
+
+    // Matching statuses are a no-op.
+    #[test]
+    fn matching_status_is_noop() {
+        assert_eq!(reconcile_target(&SessionStatus::PendingCompilation, "pending_compilation"), None);
+        assert_eq!(reconcile_target(&SessionStatus::ReasoningDegraded, "reasoning_degraded"), None);
+    }
+
+    // Cloud crash recovery: metadata carries a genuine resumable status written by
+    // mark_recovered/Kafka replay — mirror it into Redis.
+    #[test]
+    fn authoritative_resumable_metadata_is_mirrored() {
+        assert_eq!(
+            reconcile_target(&SessionStatus::Annotating, "pending_annotation"),
+            Some(SessionStatus::PendingAnnotation),
+        );
+        assert_eq!(
+            reconcile_target(&SessionStatus::ReasoningDegraded, "pending_human_annotation"),
+            Some(SessionStatus::PendingHumanAnnotation),
+        );
+        assert_eq!(
+            reconcile_target(&SessionStatus::Annotating, "incomplete"),
+            Some(SessionStatus::Incomplete),
+        );
+    }
+
+    // Unknown metadata status strings are ignored rather than panicking.
+    #[test]
+    fn unknown_metadata_status_is_ignored() {
+        assert_eq!(reconcile_target(&SessionStatus::Annotating, "banana"), None);
+    }
 }

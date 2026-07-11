@@ -57,11 +57,16 @@ def run_compile(session_id: str, console: Console) -> Optional[Path]:
 
     memory_md_path = memory_dir / "memory.md"
 
+    # Preserve an existing draft. A session left at pending_compilation by a Ctrl+Q
+    # quit keeps its memory.md (with the notes/edge-cases already written), so
+    # reopen it rather than regenerating — resuming compilation must be lossless.
+    # Delete memory.md to force a fresh scaffold.
     if memory_md_path.exists():
         console.print(
-            "[yellow]memory.md already exists — a new scaffold will overwrite the "
-            "existing draft.[/yellow]"
+            f"[green]Resuming existing memory.md draft:[/green] {memory_md_path}\n"
+            f"  (delete it to regenerate a fresh scaffold)"
         )
+        return memory_md_path
 
     scaffold = generate_scaffold(metadata, entries)
 

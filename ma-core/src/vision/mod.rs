@@ -32,12 +32,15 @@ pub fn decide(event: &CommandEvent, press_delay_ms: u64, type_delay_ms: u64) -> 
     }
 
     match event.action_type.as_str() {
-        "mouse" => match event.action_subtype.as_str() {
-            // "move" marks the destination cursor position — the useful training
-            // signal for "move cursor to X" steps.
-            "left" | "right" | "double" | "move" => FetchDecision::FetchAt { mark: true },
-            _ => FetchDecision::Skip { reason: "mouse subtype does not trigger fetch" },
-        },
+        // Every mouse interaction captures a marked at-frame. The mark is drawn at
+        // event.mouse_x/mouse_y — the acted-on position: the click point for
+        // left/right/double/middle/triple, the destination for "move" and "drag"
+        // (CC drag reports its endpoint as position_captured), the press/release
+        // point for "hold"/"release", and the pointer position for scroll. A
+        // catch-all so any current or future mouse subtype is captured rather than
+        // silently dropped as frameless — hold/release/drag/scroll/middle/triple
+        // steps previously landed in the corpus without visual context.
+        "mouse" => FetchDecision::FetchAt { mark: true },
         "keyboard" => match event.action_subtype.as_str() {
             "type"  => FetchDecision::FetchAfter { delay_ms: type_delay_ms },
             "press" => FetchDecision::FetchAfter { delay_ms: press_delay_ms },
@@ -531,8 +534,42 @@ mod tests {
     }
 
     #[test]
-    fn test_mouse_scroll_skipped() {
-        assert!(matches!(decide(&ev("mouse", "scroll_up", true), 500, 1000), FetchDecision::Skip { .. }));
+    fn test_mouse_hold_fetches_and_marks() {
+        assert_eq!(decide(&ev("mouse", "hold", true), 500, 1000), FetchDecision::FetchAt { mark: true });
+    }
+
+    #[test]
+    fn test_mouse_release_fetches_and_marks() {
+        assert_eq!(decide(&ev("mouse", "release", true), 500, 1000), FetchDecision::FetchAt { mark: true });
+    }
+
+    #[test]
+    fn test_mouse_drag_fetches_and_marks() {
+        assert_eq!(decide(&ev("mouse", "drag", true), 500, 1000), FetchDecision::FetchAt { mark: true });
+    }
+
+    #[test]
+    fn test_mouse_middle_and_triple_fetch_and_mark() {
+        assert_eq!(decide(&ev("mouse", "middle", true), 500, 1000), FetchDecision::FetchAt { mark: true });
+        assert_eq!(decide(&ev("mouse", "triple", true), 500, 1000), FetchDecision::FetchAt { mark: true });
+    }
+
+    #[test]
+    fn test_mouse_scroll_fetches_and_marks() {
+        assert_eq!(decide(&ev("mouse", "scroll_up", true), 500, 1000), FetchDecision::FetchAt { mark: true });
+        assert_eq!(decide(&ev("mouse", "scroll_down", true), 500, 1000), FetchDecision::FetchAt { mark: true });
+    }
+
+    #[test]
+    fn test_mouse_unknown_subtype_still_fetches() {
+        // Catch-all: any future mouse subtype captures a frame rather than being dropped.
+        assert_eq!(decide(&ev("mouse", "quadruple", true), 500, 1000), FetchDecision::FetchAt { mark: true });
+    }
+
+    #[test]
+    fn test_failed_mouse_command_still_skipped() {
+        // The success gate is upstream of the mouse catch-all.
+        assert!(matches!(decide(&ev("mouse", "left", false), 500, 1000), FetchDecision::Skip { .. }));
     }
 
     #[test]
