@@ -24,14 +24,25 @@ touched.
   mirrors it: a plain `pip install [--user]` into the interpreter's normal
   site-packages, with the entry-point script located via `sysconfig` (as
   `install.sh` does) rather than assumed under the `--prefix` layout. Verified by
-  simulating the install step directly and confirming `memory-archive --version`
-  still resolves immediately afterward — the exact step that failed before — and
-  by a live `memory-archive update` from 0.13.1 → 0.13.2 with a working CLI on
-  the other side.
+  simulating the fixed install step directly (`memory-archive --version` stays
+  resolvable immediately afterward — the exact step that failed before) and by
+  invoking it as the currently-installed 0.13.2 package, i.e. the code path a
+  genuine future `update` runs.
 - **`memory-archive uninstall`** now treats a leftover `MA_HOME/lib` directory
   (the artifact of the broken `--prefix` install above) as migration cleanup for
   anyone who ran an update before this fix, rather than the expected install
   layout.
+
+### Upgrade note
+
+If you already ran `memory-archive update` on a version before this fix, your
+install is currently broken (`ModuleNotFoundError: No module named 'ma_app'`),
+and **running `update` again will not repair it** — the broken, already-installed
+copy is what decides how the new version gets installed, so it repeats the same
+`--prefix` mistake regardless of the wheel it downloads. Reinstall once with
+`install.sh` / `install.ps1`, or manually: `pip install --user --upgrade
+ma_app-*.whl` from a downloaded release archive. Every `update` after that one
+manual step uses the fixed code and works normally.
 
 ## [0.13.1] — 2026-07-14
 
