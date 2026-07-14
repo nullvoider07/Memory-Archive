@@ -20,7 +20,7 @@ from rich.console import Console
 try:
     from ma_app import __version__
 except ImportError:
-    __version__ = "0.13.1"
+    __version__ = "0.13.2"
 
 # =============================================================================
 # Constants
@@ -324,13 +324,26 @@ def _replace_binary_windows(src: Path, dst: Path) -> None:
 
 def _pip_install_wheel(whl: Path, bin_dir: Path) -> bool:
     """
-    Install the wheel into MA_HOME/lib using --prefix, then copy the
-    memory-archive entry point into bin_dir alongside the Rust binaries.
+    Reinstall the wheel the same way install.sh performs the initial install:
+    a plain `pip install [--user]` into the interpreter's normal site-packages,
+    then copy the resulting entry-point script into bin_dir alongside the Rust
+    binaries.
+
+    This must NOT use `pip install --prefix <dir>`. `--prefix` installs into a
+    site-packages tree that a plain `sys.executable` invocation never adds to
+    `sys.path`, so the new package is unimportable — but pip's own `--upgrade`
+    resolver still detects the *existing* on-path install (from the original
+    `--user`/system install) and uninstalls it first. Net effect: the working
+    install is deleted and replaced with one `memory-archive` can no longer
+    import, breaking the CLI outright. Hit in production during the 0.13.1
+    update (`ModuleNotFoundError: No module named 'ma_app'` after a clean
+    "[OK] ma-app updated"). Mirroring install.sh's `--user`/system-install
+    choice keeps updates on the same importable path pip already manages.
     """
     os_name, _ = _os_info()
-    ma_home  = bin_dir.parent          # bin_dir is MA_HOME/bin
-    lib_dir  = ma_home / "lib"
-    lib_dir.mkdir(parents=True, exist_ok=True)
+    is_windows = os_name == "windows"
+    is_root = (not is_windows) and os.geteuid() == 0
+    user_flag = [] if is_root else ["--user"]
 
     # pip's resolver output ("Requirement already satisfied" lines) is captured
     # and surfaced only on failure so it does not flood the display; a Rich
@@ -339,7 +352,7 @@ def _pip_install_wheel(whl: Path, bin_dir: Path) -> bool:
         result = subprocess.run(
             [
                 sys.executable, "-m", "pip", "install",
-                "--prefix", str(lib_dir),
+                *user_flag,
                 "--no-warn-script-location",
                 "--disable-pip-version-check",
                 "--quiet",
@@ -359,15 +372,21 @@ def _pip_install_wheel(whl: Path, bin_dir: Path) -> bool:
             _console.print(f"[red]{err}[/red]")
         return False
 
-    # Copy the entry point into bin_dir so only one directory is on PATH.
-    scripts_dir = lib_dir / ("Scripts" if os_name == "windows" else "bin")
-    ep_name     = "memory-archive.exe" if os_name == "windows" else "memory-archive"
+    # Ask sysconfig where pip put the entry point (as install.sh does), then
+    # copy it into bin_dir so only one directory is on PATH.
+    import sysconfig
+    if is_windows:
+        scheme = "nt" if is_root else "nt_user"
+    else:
+        scheme = "posix_prefix" if is_root else "posix_user"
+    scripts_dir = Path(sysconfig.get_path("scripts", scheme))
+    ep_name     = "memory-archive.exe" if is_windows else "memory-archive"
     ep_src      = scripts_dir / ep_name
     ep_dst      = bin_dir / ep_name
 
     if ep_src.exists():
         shutil.copy2(ep_src, ep_dst)
-        if os_name != "windows":
+        if not is_windows:
             _chmod_exec(ep_dst)
             # Patch shebang to the current interpreter.
             _patch_shebang(ep_dst)
@@ -716,10 +735,12 @@ def _uninstall_command(
     if data_dir.exists():
         docs_to_remove.append(data_dir)
 
-    # Python package installed by `memory-archive update` into MA_HOME/lib via
-    # `pip install --prefix`.  That install is invisible to `pip show` here, so
-    # it is removed explicitly.  Guard on the MA_HOME directory name so a
-    # non-standard install location (e.g. ma-core copied into /usr/local/bin)
+    # Migration cleanup: versions of `memory-archive update` before this fix
+    # installed the Python package into MA_HOME/lib via `pip install --prefix`
+    # — a location the interpreter never adds to sys.path, which silently broke
+    # the CLI (see _pip_install_wheel). That install is invisible to `pip show`,
+    # so any leftover copy is swept here. Guard on the MA_HOME directory name so
+    # a non-standard install location (e.g. ma-core copied into /usr/local/bin)
     # can never turn this into a delete of a shared system lib directory.
     install_home = bin_dir.parent
     if install_home.name in {".memory-archive", "memory-archive", "MemoryArchive"}:

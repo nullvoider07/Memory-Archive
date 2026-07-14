@@ -6,17 +6,14 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.13.1  
+**Version:** 0.13.2  
 **Last Updated:** July 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.13.1** — registry-recovery and IPC-hardening patch:
-> - **Startup sweep no longer demotes finished recordings.** If the host goes down uncleanly right after a session's `done` completes, Redis can restart from a snapshot taken before the status flip and re-list the session as active. The sweep now trusts the on-disk `metadata.json` (frozen `complete`) and restores the session to `pending_annotation` instead of marking it incomplete and renaming its directory.
-> - **Unix IPC socket locked to the owner.** The Unix-socket transport carries no per-message token, so its filesystem permissions are the entire access boundary. The socket is now created `0600` and its parent directory `0700` before the accept loop starts, closing a gap where a same-group local user could otherwise reach unauthenticated admin operations.
-> - **`server stop` works again.** The daemon's PID file is now written to `~/.memory-archive/` (where the CLI looks for it) instead of inside the capture tree, and is removed cleanly on shutdown.
-> - A handful of smaller correctness fixes: the Redis record's `memory_path` now follows a session through an "(incomplete)" rename, manual-mode sessions finished via the direct `Done` path are annotatable again, and the stale-PID takeover on startup verifies the target process before signalling it.
+> **✨ What's new in 0.13.2** — critical updater hotfix:
+> - **`memory-archive update` no longer breaks the CLI it just updated.** The Python-package reinstall step used `pip install --prefix`, which pip's `--upgrade` resolver combined with the existing `--user` install to delete the working package and replace it with one the interpreter could no longer import — every user who ran `update` lost their CLI. It now installs the same way `install.sh` does (`pip install --user`, entry point located via `sysconfig`), verified with a live 0.13.1 → 0.13.2 update.
 >
-> Earlier in 0.13.0: frames for every mouse interaction, interrupted annotations surviving a restart, and an explicit `Ctrl+D` finalize at the compile stage. Earlier in 0.12.0: the `memory-archive session delete` command, cursor-move frames, and the annotation TUI display fix.
+> Earlier in 0.13.1: a startup-sweep fix so a fully completed recording is never demoted to incomplete after a Redis rollback, and the Unix IPC socket locked to `0600` (that transport carries no per-message token, so filesystem permission is the entire access boundary). Earlier in 0.13.0: frames for every mouse interaction, interrupted annotations surviving a restart, and an explicit `Ctrl+D` finalize at the compile stage. Earlier in 0.12.0: the `memory-archive session delete` command, cursor-move frames, and the annotation TUI display fix.
 
 > **📖 Documentation in progress** — Extended documentation covering in-depth deployment guides, architecture deep-dives, and operational runbooks for research teams, AI labs, and enterprise users is currently being written and will be published separately. This README serves as the primary reference in the meantime.
 >

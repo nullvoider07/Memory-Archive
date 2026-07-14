@@ -3,6 +3,36 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.2] — 2026-07-14
+
+Critical updater hotfix: `memory-archive update` was breaking every install it
+touched.
+
+### Fixed
+
+- **`memory-archive update` destroyed the working CLI install.** The Python
+  package reinstall step used `pip install --prefix ~/.memory-archive/lib
+  --upgrade`. Two things combined to break every update: (1) `--prefix` installs
+  into a site-packages tree the interpreter never adds to `sys.path`, so the new
+  package was unimportable; (2) pip's own `--upgrade` resolver still detected the
+  *existing* on-path install (from the original `--user`/system install done by
+  `install.sh`) and uninstalled it first. Net effect: the working install was
+  deleted and replaced with one `memory-archive` could no longer import —
+  `ModuleNotFoundError: No module named 'ma_app'` immediately after the updater
+  printed `[OK] ma-app updated`. `install.sh` already deliberately avoids
+  `--prefix` for exactly this reason (see its inline comment); `update` now
+  mirrors it: a plain `pip install [--user]` into the interpreter's normal
+  site-packages, with the entry-point script located via `sysconfig` (as
+  `install.sh` does) rather than assumed under the `--prefix` layout. Verified by
+  simulating the install step directly and confirming `memory-archive --version`
+  still resolves immediately afterward — the exact step that failed before — and
+  by a live `memory-archive update` from 0.13.1 → 0.13.2 with a working CLI on
+  the other side.
+- **`memory-archive uninstall`** now treats a leftover `MA_HOME/lib` directory
+  (the artifact of the broken `--prefix` install above) as migration cleanup for
+  anyone who ran an update before this fix, rather than the expected install
+  layout.
+
 ## [0.13.1] — 2026-07-14
 
 Registry-recovery patch: a finished recording can no longer be demoted to

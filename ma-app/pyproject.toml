@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ma-app"
-version = "0.13.1"
+version = "0.13.2"
 description = "Memory Archive — Python layer (TUI, CLI, cloud storage, memory compilation)"
 requires-python = ">=3.11"
 
