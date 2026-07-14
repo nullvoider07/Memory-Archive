@@ -3,6 +3,77 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.1] — 2026-07-14
+
+Registry-recovery patch: a finished recording can no longer be demoted to
+incomplete by the startup sweep when Redis state is stale, plus PID-file and
+status-routing fixes found in the same audit.
+
+### Security
+
+- **Unix IPC socket locked to the owner (0600).** The Unix-socket transport
+  carries no per-message token — reachability *is* authorization — yet the socket
+  was created with the process umask (0775 under a group-writable umask), so a
+  same-group local user who could reach the socket path could issue
+  unauthenticated admin commands (register, delete, done). The daemon now sets the
+  socket to 0600 and its parent directory to 0700 before the accept loop starts,
+  so ownership is the boundary regardless of umask or where `ipc_socket_path`
+  points. TCP IPC is unaffected (already token-gated over TLS 1.3, and refuses to
+  start without `MA_IPC_TOKEN`). Added a `validate_session_id` unit test covering
+  empty/`.`/`..`/embedded-traversal/separator/absolute vectors.
+
+### Fixed
+
+- **Startup sweep no longer demotes finished recordings.** If the host goes down
+  uncleanly after `done` completes, Redis can restart from a snapshot taken
+  before the status flip and re-list the session as `active`. The sweep then
+  marked the session incomplete and renamed its memory directory — even though
+  `metadata.json` was frozen at `complete` with every frame flushed. The sweep
+  now treats an on-disk `complete` status as authoritative and restores the
+  session to `pending_annotation` instead of touching the directory. (Observed
+  live: a completed capture was demoted after an overnight power loss; the
+  recording itself was intact.)
+
+- **PID file written where `server stop` looks for it.** ma-core wrote
+  `ma-core.pid` next to the storage path (inside the capture tree) while the CLI
+  reads `~/.memory-archive/ma-core.pid`, so `server stop` always failed with "No
+  ma-core.pid file". The daemon now writes the PID file next to `config.json`,
+  and removes it on shutdown.
+
+- **Stale-PID takeover verifies the target process.** On startup, ma-core
+  SIGTERM'd whatever PID the stale PID file named. After a reboot that PID can
+  belong to an unrelated process. The takeover now confirms the process is
+  actually `ma-core` before signalling, and ignores the file otherwise.
+
+- **`memory_path` follows the "(incomplete)" rename.** `mark_incomplete` renames
+  the memory directory but the Redis record kept the old path, so any later
+  lookup (annotate, compile, delete) resolved a directory that no longer
+  existed. All rename sites now update the record's `memory_path`.
+
+- **Manual sessions finished via the direct `Done` path are annotatable.** The
+  no-watch-loop `Done` branch routed manual-mode sessions to
+  `pending_human_annotation`, which the annotation loader rejects — the session
+  became un-annotatable. The branch now mirrors the watch-loop path: status is
+  chosen by reasoning degradation, not session mode.
+
+- **`convert` unit tests brought in line with shipped behavior.** Three tests
+  asserted pre-normalization output (`Press: ^c`, `Press: Return`, synthesized
+  `scroll-down`); the shipped converter — and the recorded corpus — use humanized
+  modifiers (`Press: Ctrl+c`), cross-OS key labels (`Press: Enter`), and raw
+  passthrough for unknown action types.
+
+- **Redundant comparison in the pricing-registry age alert.** The stale-manifest
+  check read `age > 0.0 && age > 604_800.0`; the first clause is implied by the
+  second (a `deny`-level clippy lint). Simplified to `age > 604_800.0`; behavior
+  unchanged.
+
+### Operational note
+
+The registry's annotation sub-lifecycle lives only in Redis; with default RDB
+snapshotting, an unclean host shutdown can roll it back by up to an hour. Enable
+AOF (`appendonly yes`) on the local Redis so registry updates survive power
+loss.
+
 ## [0.13.0] — 2026-07-11
 
 Capture-fidelity and crash-recovery release: drag-interaction frames, an explicit

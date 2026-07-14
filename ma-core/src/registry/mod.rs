@@ -167,6 +167,37 @@ impl SessionRegistry {
         Ok(())
     }
 
+    // update_memory_path
+    /// Update the stored `memory_path` after the on-disk directory is renamed
+    /// (`session::mark_incomplete` appends " (incomplete)"), keeping later path
+    /// lookups (annotate, compile, delete) valid.
+    pub async fn update_memory_path(
+        &mut self,
+        session_id: &str,
+        new_path: &str,
+    ) -> anyhow::Result<()> {
+        let key = session_key(session_id);
+        let now = Utc::now().to_rfc3339();
+
+        redis::cmd("HSET")
+            .arg(&key)
+            .arg(&[
+                "memory_path", new_path,
+                "updated_at",  &now,
+            ])
+            .query_async::<()>(&mut self.conn)
+            .await
+            .context("HSET memory_path update failed")?;
+
+        tracing::info!(
+            session_id = %session_id,
+            memory_path = %new_path,
+            "Session memory_path updated"
+        );
+
+        Ok(())
+    }
+
     // update_annotation_counters
     pub async fn update_annotation_counters(
         &mut self,

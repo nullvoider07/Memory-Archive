@@ -1096,4 +1096,28 @@ mod local_backend_tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn validate_session_id_rejects_traversal_vectors() {
+        use super::validate_session_id;
+        // Every id that could escape or resolve to the storage root must be refused.
+        for bad in [
+            "",                       // resolves to storage root
+            ".",
+            "..",
+            "../escape",
+            "nested/../../etc",       // embedded traversal
+            "a/b",                    // forward separator
+            "a\\b",                   // backslash separator (Windows)
+            "/etc/passwd",            // absolute
+            "..\\..\\win",
+        ] {
+            assert!(
+                validate_session_id(bad).is_err(),
+                "expected rejection for {bad:?}"
+            );
+        }
+        // A real UUID is accepted.
+        assert!(validate_session_id(&uuid::Uuid::new_v4().to_string()).is_ok());
+    }
 }

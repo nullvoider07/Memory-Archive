@@ -58,7 +58,12 @@ pub fn initialise(record: &SessionRecord, storage_path: &str, is_cloud_primary: 
 }
 
 /// Rename an active memory directory to flag it as incomplete.
-pub fn mark_incomplete(memory_dir: &Path) -> anyhow::Result<()> {
+///
+/// Returns the directory's path after the rename so callers can propagate it to
+/// the session registry — the Redis record's `memory_path` must track the rename
+/// or later lookups (annotate, compile, delete) resolve a path that no longer
+/// exists.
+pub fn mark_incomplete(memory_dir: &Path) -> anyhow::Result<PathBuf> {
     let parent = memory_dir
         .parent()
         .context("Memory directory has no parent")?;
@@ -70,7 +75,7 @@ pub fn mark_incomplete(memory_dir: &Path) -> anyhow::Result<()> {
 
     // Avoid double-flagging if already marked incomplete.
     if current_name.ends_with(" (incomplete)") {
-        return Ok(());
+        return Ok(memory_dir.to_path_buf());
     }
 
     let incomplete_name = format!("{current_name} (incomplete)");
@@ -89,7 +94,7 @@ pub fn mark_incomplete(memory_dir: &Path) -> anyhow::Result<()> {
         incomplete_dir.display()
     );
 
-    Ok(())
+    Ok(incomplete_dir)
 }
 
 /// Permanently remove a session's local memory directory and its

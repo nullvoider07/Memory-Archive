@@ -51,6 +51,55 @@ fn reconcile_target(
     }
 }
 
+/// Decide whether a session found in `sessions:active` by the startup sweep is
+/// actually a finished recording whose Redis state went stale — e.g. an unclean
+/// host shutdown rolled Redis back to a snapshot taken before `done` ran.
+/// metadata.json.status is written as "complete" only by the clean `done` path
+/// after the final flush, so it is authoritative here: the recording on disk is
+/// finished and intact, and the session must be restored to the post-capture
+/// status rather than demoted to incomplete (which would also rename its
+/// directory). Returns the status to restore, or `None` to fall through to the
+/// normal interrupted-session handling. A session that had already progressed
+/// past pending_annotation before the rollback (annotated or finalized) is also
+/// restored to PendingAnnotation — the sub-lifecycle lives only in Redis and
+/// cannot be reconstructed, and pending_annotation is resumable from every later
+/// stage.
+fn active_sweep_restore_target(metadata_status: &str) -> Option<registry::schema::SessionStatus> {
+    if metadata_status == "complete" {
+        Some(registry::schema::SessionStatus::PendingAnnotation)
+    } else {
+        None
+    }
+}
+
+/// Best-effort check that `pid` belongs to a running ma-core process. Guards the
+/// stale-PID takeover against PID reuse: after a reboot the recorded PID can
+/// belong to an arbitrary unrelated process, which must not be signalled.
+#[cfg(unix)]
+fn process_is_ma_core(pid: i32) -> bool {
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .map(|o| {
+            let comm = String::from_utf8_lossy(&o.stdout);
+            comm.trim()
+                .rsplit('/')
+                .next()
+                .map(|name| name == "ma-core")
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn process_is_ma_core(pid: i32) -> bool {
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("ma-core"))
+        .unwrap_or(false)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
@@ -68,7 +117,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!("Failed to initialize metrics endpoint: {e}");
     }
 
-    let pid_path = std::path::PathBuf::from(&cfg.storage_path)
+    // PID file lives next to config.json (~/.memory-archive/ma-core.pid) — the
+    // same location the CLI's `server stop` reads. Previously it was written to
+    // the storage_path parent, which the CLI never checks and which pollutes the
+    // capture tree.
+    let pid_path = config::config_path()
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(std::env::temp_dir)
@@ -76,18 +129,25 @@ async fn main() -> anyhow::Result<()> {
     if pid_path.exists() {
         if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
             if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                tracing::warn!(pid, "Existing ma-core process found — terminating stale process");
-                #[cfg(unix)]
-                {
-                    unsafe { libc::kill(pid, libc::SIGTERM); }
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-                #[cfg(windows)]
-                {
-                    let _ = std::process::Command::new("taskkill")
-                        .args(["/PID", &pid.to_string(), "/F"])
-                        .status();
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if process_is_ma_core(pid) {
+                    tracing::warn!(pid, "Existing ma-core process found — terminating stale process");
+                    #[cfg(unix)]
+                    {
+                        unsafe { libc::kill(pid, libc::SIGTERM); }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    #[cfg(windows)]
+                    {
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/PID", &pid.to_string(), "/F"])
+                            .status();
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                } else {
+                    tracing::warn!(
+                        pid,
+                        "Stale PID file does not point at a ma-core process — ignoring"
+                    );
                 }
             }
         }
@@ -171,8 +231,18 @@ async fn main() -> anyhow::Result<()> {
                             "Startup sweep: cannot read metadata — marking incomplete"
                         );
                         if !is_cloud_primary_with_kafka {
-                            if let Err(e) = session::mark_incomplete(&memory_dir) {
-                                tracing::error!(session_id = %session_id, "Startup sweep: mark_incomplete failed: {e}");
+                            match session::mark_incomplete(&memory_dir) {
+                                Ok(new_dir) => {
+                                    if let Err(e) = registry
+                                        .update_memory_path(&session_id, &new_dir.to_string_lossy())
+                                        .await
+                                    {
+                                        tracing::error!(session_id = %session_id, "Startup sweep: memory_path update failed: {e}");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(session_id = %session_id, "Startup sweep: mark_incomplete failed: {e}");
+                                }
                             }
                         }
                         if let Err(e) = registry
@@ -184,6 +254,23 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
+
+                // A finished recording (metadata.json frozen at "complete" by the
+                // clean `done` path) listed as active means Redis is stale — e.g.
+                // an unclean host shutdown rolled Redis back to a snapshot taken
+                // before `done` updated it. Restore the post-capture status; do
+                // NOT mark incomplete (that would also rename the memory dir of a
+                // fully intact recording).
+                if let Some(restore) = active_sweep_restore_target(&meta.status) {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "Startup sweep: session is active in Redis but metadata.json is complete — restoring resumable status"
+                    );
+                    if let Err(e) = registry.update_status(&session_id, restore).await {
+                        tracing::error!(session_id = %session_id, "Startup sweep: Redis restore failed: {e}");
+                    }
+                    continue;
+                }
 
                 let in_progress = meta.in_progress.as_deref();
 
@@ -198,8 +285,18 @@ async fn main() -> anyhow::Result<()> {
                             "Startup sweep: active session with no in_progress flag — marking incomplete"
                         );
                         if !is_cloud_primary_with_kafka {
-                            if let Err(e) = session::mark_incomplete(&memory_dir) {
-                                tracing::error!(session_id = %session_id, "Startup sweep: mark_incomplete failed: {e}");
+                            match session::mark_incomplete(&memory_dir) {
+                                Ok(new_dir) => {
+                                    if let Err(e) = registry
+                                        .update_memory_path(&session_id, &new_dir.to_string_lossy())
+                                        .await
+                                    {
+                                        tracing::error!(session_id = %session_id, "Startup sweep: memory_path update failed: {e}");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(session_id = %session_id, "Startup sweep: mark_incomplete failed: {e}");
+                                }
                             }
                         }
                         if let Err(e) = registry
@@ -319,8 +416,18 @@ async fn main() -> anyhow::Result<()> {
                 );
 
                 if !is_cloud_primary_with_kafka {
-                    if let Err(e) = session::mark_incomplete(&memory_dir) {
-                        tracing::error!(session_id = %session_id, "Startup sweep: mark_incomplete failed: {e}");
+                    match session::mark_incomplete(&memory_dir) {
+                        Ok(new_dir) => {
+                            if let Err(e) = registry
+                                .update_memory_path(&session_id, &new_dir.to_string_lossy())
+                                .await
+                            {
+                                tracing::error!(session_id = %session_id, "Startup sweep: memory_path update failed: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(session_id = %session_id, "Startup sweep: mark_incomplete failed: {e}");
+                        }
                     }
                 }
 
@@ -403,6 +510,7 @@ async fn main() -> anyhow::Result<()> {
         let mut reg = registry.clone();
         let sr = storage_router.clone();
         let cfg_signal = cfg.clone();
+        let pid_path_signal = pid_path.clone();
         tokio::spawn(async move {
             #[cfg(unix)]
             {
@@ -468,6 +576,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             tracing::warn!("All active sessions flagged — exiting");
+            let _ = std::fs::remove_file(&pid_path_signal);
             std::process::exit(0);
         });
     }
@@ -595,5 +704,33 @@ mod reconcile_tests {
     #[test]
     fn unknown_metadata_status_is_ignored() {
         assert_eq!(reconcile_target(&SessionStatus::Annotating, "banana"), None);
+    }
+}
+
+#[cfg(test)]
+mod active_sweep_tests {
+    use super::active_sweep_restore_target;
+    use crate::registry::schema::SessionStatus;
+
+    // The bug this fixes: a session whose `done` completed on disk (metadata.json
+    // frozen at "complete") but whose Redis state rolled back to active — e.g. an
+    // unclean host shutdown restored a pre-`done` RDB snapshot — was demoted to
+    // incomplete and its directory renamed, even though the recording was fully
+    // intact. It must instead be restored to pending_annotation.
+    #[test]
+    fn completed_metadata_restores_pending_annotation() {
+        assert_eq!(
+            active_sweep_restore_target("complete"),
+            Some(SessionStatus::PendingAnnotation),
+        );
+    }
+
+    // Genuinely interrupted or never-started sessions fall through to the normal
+    // incomplete handling.
+    #[test]
+    fn non_complete_metadata_falls_through() {
+        assert_eq!(active_sweep_restore_target("active"), None);
+        assert_eq!(active_sweep_restore_target("incomplete"), None);
+        assert_eq!(active_sweep_restore_target(""), None);
     }
 }

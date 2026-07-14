@@ -312,7 +312,7 @@ pub fn init_metrics(config: &ObservabilityConfig) -> anyhow::Result<()> {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             let age = metrics().pricing_registry_age_seconds.get();
-            if age > 0.0 && age > 604_800.0 {
+            if age > 604_800.0 {
                 tracing::warn!(
                     age_seconds = age as u64,
                     "Pricing registry manifest is more than 7 days old — fetch may be failing"

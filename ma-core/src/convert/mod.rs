@@ -422,16 +422,20 @@ mod tests {
         assert_eq!(to_human_readable(&e), "Type: hello world");
     }
 
+    // AHK-style modifier prefixes are expanded to plain English (^c → Ctrl+c).
     #[test]
     fn test_keyboard_press() {
         let e = event("keyboard", "press", "Pressed: ^c", true, false, 0, 0, false);
-        assert_eq!(to_human_readable(&e), "Press: ^c");
+        assert_eq!(to_human_readable(&e), "Press: Ctrl+c");
     }
 
+    // OS-native bare key names are normalized to one label across platforms:
+    // macOS/Linux "Return" and Windows "Enter" both convert to "Enter" (see
+    // humanize_bare_key), so corpus output does not fork per OS.
     #[test]
-    fn test_keyboard_press_macos_return() {
+    fn test_keyboard_press_return_normalized() {
         let e = event("keyboard", "press", "Pressed: Return", true, false, 0, 0, false);
-        assert_eq!(to_human_readable(&e), "Press: Return");
+        assert_eq!(to_human_readable(&e), "Press: Enter");
     }
 
     #[test]
@@ -446,10 +450,12 @@ mod tests {
         assert_eq!(to_human_readable(&e), "Position query at (512, 300)");
     }
 
+    // Unknown action types pass the raw command through unchanged rather than
+    // synthesizing a "{type}-{subtype}" label.
     #[test]
     fn test_unknown_action_type() {
         let e = event("scroll", "down", "scroll down", true, false, 0, 0, false);
-        assert_eq!(to_human_readable(&e), "scroll-down");
+        assert_eq!(to_human_readable(&e), "scroll down");
     }
 
     #[test]

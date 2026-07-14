@@ -3,6 +3,8 @@
 pub mod messages;
 
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use anyhow::Context;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -39,11 +41,29 @@ pub async fn serve(
         std::fs::create_dir_all(parent).with_context(|| {
             format!("Failed to create socket directory: {}", parent.display())
         })?;
+        // Restrict the socket's directory to the owner. The Unix IPC transport is
+        // unauthenticated — every admin operation (register, delete, done) is
+        // reachable by anyone who can connect to the socket — so the filesystem
+        // permission is the entire access boundary. Do not rely on umask.
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| {
+                format!("Failed to restrict socket directory permissions: {}", parent.display())
+            })?;
     }
 
     let listener = UnixListener::bind(&socket_path).with_context(|| {
         format!("Failed to bind socket: {}", socket_path.display())
     })?;
+
+    // Lock the socket itself to owner-only (0600). With the default umask the
+    // bind above yields a group/other-accessible socket (0775 under umask 002);
+    // since the transport carries no token, a same-group local user could
+    // otherwise issue unauthenticated admin commands. Set perms before the accept
+    // loop starts so there is no window where the socket is connectable by others.
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| {
+            format!("Failed to restrict socket permissions: {}", socket_path.display())
+        })?;
 
     tracing::info!("IPC Unix socket server ready");
     tracing::debug!("IPC socket path: {}", socket_path.display());
@@ -940,7 +960,15 @@ async fn handle_message(
                                     tracing::error!(session_id = %session_id, "Direct clear_in_progress() failed: {e}");
                                 }
                             }
-                            let done_status = if record.mode == crate::registry::schema::SessionMode::Manual {
+                            // Match the watch-loop completion path: annotation
+                            // routing depends on whether reasoning degraded, not
+                            // on session mode. LoadSession rejects
+                            // pending_human_annotation, so the previous
+                            // mode-based branch left manual sessions finished
+                            // through this path un-annotatable.
+                            let was_degraded = reasoning_maps.is_degraded(&session_id).await;
+                            reasoning_maps.remove_session(&session_id).await;
+                            let done_status = if was_degraded {
                                 crate::registry::schema::SessionStatus::PendingHumanAnnotation
                             } else {
                                 crate::registry::schema::SessionStatus::PendingAnnotation

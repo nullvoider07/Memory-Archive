@@ -6,16 +6,17 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.13.0  
+**Version:** 0.13.1  
 **Last Updated:** July 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.13.0** — capture fidelity and crash recovery:
-> - **Frames for every mouse interaction.** All mouse subtypes now capture before/at/after screenshots with the cursor marked at the acted-on position — clicks (`left`/`right`/`double`/`middle`/`triple`), `move`, `drag`, `hold`/`release`, and `scroll`. Previously only left/right/double/move did, so hold, release, drag, middle, triple, and scroll steps were recorded frameless. Applies to sessions captured on 0.13.0 and later.
-> - **Interrupted annotations survive a restart.** An annotation session that was interrupted by an unclean ma-core exit (power cut, reboot) is no longer demoted to `complete` and locked out of `memory-archive annotate`. The startup reconcile sweep now restores it to `pending_annotation` so the TUI resumes from where you left off.
-> - **Explicit finalize at the compile stage.** The memory.md editor now has a dedicated `Ctrl+D` to finalize (save → confirm → mark the session complete). `Ctrl+Q` no longer finalizes — it exits leaving the session at `pending_compilation`, resumable with `memory-archive compile`, and the saved draft (notes/edge-cases) is preserved on resume rather than regenerated.
+> **✨ What's new in 0.13.1** — registry-recovery and IPC-hardening patch:
+> - **Startup sweep no longer demotes finished recordings.** If the host goes down uncleanly right after a session's `done` completes, Redis can restart from a snapshot taken before the status flip and re-list the session as active. The sweep now trusts the on-disk `metadata.json` (frozen `complete`) and restores the session to `pending_annotation` instead of marking it incomplete and renaming its directory.
+> - **Unix IPC socket locked to the owner.** The Unix-socket transport carries no per-message token, so its filesystem permissions are the entire access boundary. The socket is now created `0600` and its parent directory `0700` before the accept loop starts, closing a gap where a same-group local user could otherwise reach unauthenticated admin operations.
+> - **`server stop` works again.** The daemon's PID file is now written to `~/.memory-archive/` (where the CLI looks for it) instead of inside the capture tree, and is removed cleanly on shutdown.
+> - A handful of smaller correctness fixes: the Redis record's `memory_path` now follows a session through an "(incomplete)" rename, manual-mode sessions finished via the direct `Done` path are annotatable again, and the stale-PID takeover on startup verifies the target process before signalling it.
 >
-> Earlier in 0.12.0: the `memory-archive session delete` command, cursor-move frames, and the annotation TUI display fix.
+> Earlier in 0.13.0: frames for every mouse interaction, interrupted annotations surviving a restart, and an explicit `Ctrl+D` finalize at the compile stage. Earlier in 0.12.0: the `memory-archive session delete` command, cursor-move frames, and the annotation TUI display fix.
 
 > **📖 Documentation in progress** — Extended documentation covering in-depth deployment guides, architecture deep-dives, and operational runbooks for research teams, AI labs, and enterprise users is currently being written and will be published separately. This README serves as the primary reference in the meantime.
 >

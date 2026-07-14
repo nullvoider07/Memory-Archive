@@ -68,12 +68,28 @@ impl DisconnectHandler {
                     "Failed to update metadata.json status to incomplete: {e}"
                 );
             }
-            if let Err(e) = session::mark_incomplete(&self.memory_dir) {
-                tracing::error!(
-                    session_id = %self.session_id,
-                    memory_dir = %self.memory_dir.display(),
-                    "Failed to mark memory directory as incomplete: {e}"
-                );
+            match session::mark_incomplete(&self.memory_dir) {
+                Ok(new_dir) => {
+                    // Keep the Redis record's memory_path in sync with the rename
+                    // so later lookups resolve the "(incomplete)" directory.
+                    if let Err(e) = self
+                        .registry
+                        .update_memory_path(&self.session_id, &new_dir.to_string_lossy())
+                        .await
+                    {
+                        tracing::error!(
+                            session_id = %self.session_id,
+                            "Failed to update memory_path after incomplete rename: {e}"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        session_id = %self.session_id,
+                        memory_dir = %self.memory_dir.display(),
+                        "Failed to mark memory directory as incomplete: {e}"
+                    );
+                }
             }
         }
 
