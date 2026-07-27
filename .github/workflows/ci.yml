@@ -47,6 +47,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # rdkafka-sys vendors librdkafka and compiles it from C, so the headers
+      # must be present or the build fails on curl/curl.h. Mirrors release.yml.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libssl-dev pkg-config libcurl4-openssl-dev
+
       # ma-proto/build.rs calls tonic_build::compile_protos() at compile time and
       # src/gen/ is gitignored, so a clean checkout must regenerate it.
       - name: Install protoc
@@ -76,6 +83,13 @@ jobs:
   audit:
     name: Dependency advisories
     runs-on: ubuntu-24.04
+
+    # audit-check publishes its findings as a check run, which the default
+    # read-only token cannot create.
+    permissions:
+      contents: read
+      checks: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -114,6 +128,11 @@ jobs:
           toolchain: 'stable'
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libssl-dev pkg-config libcurl4-openssl-dev
 
       - name: Install protoc
         run: |
