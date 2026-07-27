@@ -80,6 +80,12 @@ Control-Center 1.1.0+ compatibility, and the silent capture failure it exposed.
   server. Tests pin Redis DB 15 and refuse to flush any other, so they cannot
   reach the live session registry in DB 0. `integration-tests/stage-cc-releases.sh`
   fetches the server binaries; everything skips cleanly when they are absent.
+- **CI** (`.github/workflows/ci.yml`). `release.yml` builds artefacts but runs no
+  tests and checks no advisories, which is why both the Control-Center 1.1.0
+  regression and three certificate-validation advisories went unnoticed. Every
+  push now builds, clippies, runs the Rust and Python suites against a Redis
+  service, and fails on any `cargo audit` advisory. The compatibility matrix is a
+  `workflow_dispatch` job, since it downloads three Control-Center releases.
 
 ### Security
 
@@ -102,16 +108,28 @@ Control-Center 1.1.0+ compatibility, and the silent capture failure it exposed.
   `RUSTSEC-2026-0098`, URI name constraints incorrectly accepted) and one is a
   reachable panic in CRL parsing (`RUSTSEC-2026-0104`). This release is what puts
   that code on the hot path: before it, the Control-Center connection never
-  verified a certificate at all. `rustls-webpki` is now pinned to `0.103.13` on
-  that path, along with `crossbeam-epoch` `0.9.20` and `quinn-proto` `0.11.15`.
-  Nine advisories down to three.
+  verified a certificate at all. `rustls-webpki` moves to `0.103.13`, with
+  `crossbeam-epoch` `0.9.20` and `quinn-proto` `0.11.15`.
 
-  The remaining three are the same `rustls-webpki` defects in `0.101.7`, reached
-  through `rustls 0.21` inside `aws-smithy-http-client` — the AWS SDK's own TLS
-  stack, used only in `cloud_primary` mode and **not** on the Control-Center path.
-  Clearing them requires a newer `aws-smithy` release that needs Rust 1.94.1,
-  above this project's current toolchain, so it is deliberately deferred rather
-  than taken as an unplanned toolchain bump inside a patch-level dependency fix.
+  The last three were the same `rustls-webpki` defects in `0.101.7`, and they were
+  a **feature flag, not an out-of-date version**. `aws-sdk-s3`'s default features
+  include `"rustls"`, which selects the legacy hyper-0.14 connector through
+  `aws-smithy-runtime/tls-rustls` →
+  `aws-smithy-http-client/legacy-rustls-ring`, dragging in `rustls 0.21` and with
+  it the vulnerable `rustls-webpki`. The modern connector is a separate feature
+  (`default-https-client` → `rustls-aws-lc` → `rustls 0.23`) and is the one
+  `S3Backend` actually uses, since it builds its client through
+  `aws_config::defaults`. `aws-sdk-s3` is now declared with
+  `default-features = false` and its default list minus `"rustls"`.
+
+  **`cargo audit` reports zero vulnerabilities.** No toolchain bump and no
+  dependency version bumps were needed. An earlier draft of this entry claimed
+  clearing these required a newer `aws-smithy` on Rust 1.94.1; that was wrong — a
+  dry-run update of the whole AWS stack leaves `rustls`, `hyper-rustls` and
+  `webpki` untouched, so the bump would have cost a great deal and fixed nothing.
+
+  Thirteen non-vulnerability warnings remain untriaged (4 unmaintained, 7
+  unsound, 2 yanked).
 
 - **`CcEndpoint` no longer derives `Debug`.** The struct holds the token, and a
   derived impl meant any future `?cc` at a `tracing` call site would publish the

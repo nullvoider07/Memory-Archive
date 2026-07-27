@@ -41,7 +41,22 @@ tokio-rustls = "0.26"
 
 # cloud providers
 aws-config = { version = "1.1.7", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1.112.0"
+# This is aws-sdk-s3's own default feature list minus "rustls". Do not restore
+# default features.
+#
+# "rustls" selects the legacy hyper-0.14 connector via
+# aws-smithy-runtime/tls-rustls -> aws-smithy-http-client/legacy-rustls-ring,
+# which pulls rustls 0.21 and with it rustls-webpki 0.101.7 — three open
+# advisories, two of them certificate-validation bypasses (RUSTSEC-2026-0099,
+# -0098) and one a reachable panic (RUSTSEC-2026-0104). Nothing here uses that
+# connector: S3Backend builds its client through aws_config::defaults, which is
+# the "default-https-client" path below (rustls-aws-lc -> rustls 0.23).
+aws-sdk-s3 = { version = "1.112.0", default-features = false, features = [
+    "sigv4a",
+    "http-1x",
+    "default-https-client",
+    "rt-tokio",
+] }
 regex = "1"
 google-cloud-storage = "1.7"
 bytes = "1"

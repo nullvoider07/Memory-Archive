@@ -1,0 +1,140 @@
+# CI — build, lint, test, and audit on every push.
+#
+# release.yml builds artefacts but runs no tests and checks no advisories. The
+# Control-Center 1.1.0 regression (sessions reporting "active" while recording
+# nothing) shipped because nothing ran the suite; three certificate-validation
+# advisories sat open for the same reason. This workflow is the gate for both.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build, lint and test
+    runs-on: ubuntu-24.04
+
+    # ma-core/src/registry/mod.rs connects to a real Redis; the registry unit
+    # tests fail without one.
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 'stable'
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # ma-proto/build.rs calls tonic_build::compile_protos() at compile time and
+      # src/gen/ is gitignored, so a clean checkout must regenerate it.
+      - name: Install protoc
+        run: |
+          curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip -o /tmp/protoc.zip
+          unzip -o /tmp/protoc.zip -d /usr/local bin/protoc
+          chmod +x /usr/local/bin/protoc
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Clippy
+        run: cargo clippy --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Python tests
+        run: |
+          python3 -m pip install --upgrade pip pytest
+          python3 -m pytest ma-app/tests -q
+
+  audit:
+    name: Dependency advisories
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fails the build on any advisory. Two of the three found in 0.14.0 were
+      # certificate-validation bypasses on the path that verifies the
+      # Control-Center server certificate, so this gate is not advisory-only.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Opt-in: downloads three Control-Center release archives and takes several
+  # minutes, so it does not gate every push. Run it before cutting a release, or
+  # after any change to the capture stream.
+  compatibility:
+    name: Control-Center compatibility matrix
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'workflow_dispatch'
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 'stable'
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install protoc
+        run: |
+          curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip -o /tmp/protoc.zip
+          unzip -o /tmp/protoc.zip -d /usr/local bin/protoc
+          chmod +x /usr/local/bin/protoc
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build ma-core and install the CLI
+        run: |
+          cargo build -p ma-core --locked
+          python3 -m pip install --upgrade pip pytest
+          python3 -m pip install ./ma-app
+
+      - name: Stage Control-Center releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash integration-tests/stage-cc-releases.sh
+
+      - name: Compatibility matrix
+        run: python3 -m pytest integration-tests -q
