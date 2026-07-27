@@ -6,15 +6,18 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.13.2  
+**Version:** 0.14.0  
 **Last Updated:** July 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.13.2** — critical updater hotfix:
-> - **`memory-archive update` no longer breaks the CLI it just updated.** The Python-package reinstall step used `pip install --prefix`, which pip's `--upgrade` resolver combined with the existing `--user` install to delete the working package and replace it with one the interpreter could no longer import — every user who ran `update` lost their CLI. It now installs the same way `install.sh` does (`pip install --user`, entry point located via `sysconfig`).
-> - **If your install is already broken from this bug, `update` alone will not fix it** — the broken copy decides how the next version installs, so it repeats the mistake regardless of which version it downloads. Reinstall once via `install.sh`/`install.ps1` (or `pip install --user --upgrade` the wheel from a release archive); every `update` after that works normally.
+> **✨ What's new in 0.14.0** — Control-Center 1.1.0+ compatibility, and a silent capture failure closed:
+> - **Capture works against every Control-Center release (1.0.0, 1.1.0, 1.2.0) from one configuration.** Control-Center 1.1.0 made TLS mandatory and put a `monitor` scope on `WatchCommands`; Memory Archive connected in plaintext with no credentials, so **every session against 1.1.0+ recorded zero steps**. The capture stream now presents a bearer token and negotiates the transport — TLS first, falling back to plaintext only when the transport itself fails, and never silently. Set `control_center_token` (and `control_center_tls_ca` for a private CA); see [Control-Center compatibility](#control-center-compatibility).
+> - **A watch that cannot subscribe now fails loudly instead of looking healthy.** `memory-archive start` previously returned success the moment the loop was spawned, before the gRPC subscription was attempted. A failure left the session sitting at `active`, recording nothing, with the error visible nowhere — the operator only found out by noticing an empty trace. `start` now waits for the event source to come up, exits non-zero with the cause, and marks the session `incomplete` rather than stranding it `active`.
+> - **Frames are no longer marked at a position the pointer never occupied.** `mouse_x`/`mouse_y` are non-optional, so an uncaptured position arrives as `(0, 0)` — a real coordinate, the top-left corner. Control-Center 1.2.0 reports `position_captured=false` whenever it cannot verify the readback, which makes that common rather than rare. The click marker is now drawn only when the position was verified; the frame is still captured either way.
+> - **Sessions record which Control-Center produced them** (`actuation_agent_version`, `actuation_transport` in `metadata.json`). `position_captured` means "best-effort readback" before 1.2.0 and "verified, or false" from 1.2.0 on, so a consumer cannot interpret recorded coordinates correctly without knowing which wrote them.
+> - **Installer PATH persistence fixed** on both `install.sh` and `install.ps1`: the entry is now written based on the shell rc file (or the Windows registry), not the current process `$PATH`, so a shell that already had it exported no longer causes every fresh terminal to miss it.
 >
-> Earlier in 0.13.1: a startup-sweep fix so a fully completed recording is never demoted to incomplete after a Redis rollback, and the Unix IPC socket locked to `0600` (that transport carries no per-message token, so filesystem permission is the entire access boundary). Earlier in 0.13.0: frames for every mouse interaction, interrupted annotations surviving a restart, and an explicit `Ctrl+D` finalize at the compile stage. Earlier in 0.12.0: the `memory-archive session delete` command, cursor-move frames, and the annotation TUI display fix.
+> Earlier in 0.13.2: a critical updater hotfix — `memory-archive update` used `pip install --prefix` and destroyed the install it was updating. If your install is still broken from that bug, `update` alone cannot repair it (the broken copy decides how the next version installs); reinstall once via `install.sh`/`install.ps1`. Earlier in 0.13.1: a startup-sweep fix so a fully completed recording is never demoted to incomplete after a Redis rollback, and the Unix IPC socket locked to `0600`. Earlier in 0.13.0: frames for every mouse interaction, interrupted annotations surviving a restart, and an explicit `Ctrl+D` finalize at the compile stage.
 
 > **📖 Documentation in progress** — Extended documentation covering in-depth deployment guides, architecture deep-dives, and operational runbooks for research teams, AI labs, and enterprise users is currently being written and will be published separately. This README serves as the primary reference in the meantime.
 >
@@ -163,7 +166,7 @@ Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) an
 - Reconcile sweep: re-queue orphaned `annotating` sessions on `ma-core` restart
 
 **Capture:**
-- Stream CommandEvent messages from Control-Center WatchCommands gRPC endpoint
+- Stream CommandEvent messages from Control-Center WatchCommands gRPC endpoint (TLS + `monitor`-scoped token; compatible with Control-Center 1.0.0 through 1.2.0)
 - Consume CommandEvent messages from Kafka (cloud_primary mode)
 - Drop position-only events silently (no file write, no step counter increment)
 - Write `raw_input.md`, `converted_input.md`, `actuation_commands.json`, `cc_commands.json` atomically per step
@@ -267,7 +270,7 @@ Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) an
 
 **Session Lifecycle Management.** Every Memory Archive recording begins with a session registration IPC call that creates a Redis hash for the session and initializes the memory directory structure on disk or cloud. The session moves through a well-defined state machine — `active` → `pending_annotation` → `annotating` → `pending_compilation` → `complete` — with defined exception paths for incomplete disconnects and VLM degradation. Redis Set indexes (`sessions:active`, `sessions:pending`, etc.) allow O(1) membership checks and fast queue operations. On `ma-core` startup, a startup sweep inspects all sessions with `active` or `annotating` status and marks those whose associated processes are no longer running as `incomplete` or re-queues them. A reconcile sweep re-queues any orphaned `annotating` sessions that have no live heartbeat. TTLs are enforced in Redis: `incomplete` sessions expire after 7 days, `complete` sessions after 90 days.
 
-**Capture and Command Processing.** The capture loop (`run_watch_loop`) supports two event sources — direct gRPC streaming from Control-Center or Kafka consumption (cloud_primary mode). In gRPC mode, the `WatchStream` connects directly to the Control-Center WatchCommands endpoint. In Kafka mode, `StreamConsumer` subscribes to the `control-center-events` topic, consuming from the partition keyed to the session's `session_id`. Position-only events are silently dropped; heartbeat-only messages from Control-Center are filtered before any processing. For each non-position event, the capture loop writes four files atomically: `raw_input.md` (raw command string), `converted_input.md` (human-readable), `actuation_commands.json` (full CommandEvent JSON), and `cc_commands.json` (Control-Center replay format). The `convert` module normalizes key names per OS (`humanize_key`) and generates grammatically correct human-readable descriptions. Silence detection monitors the time since the last non-position event; if the configurable `silence_timeout_seconds` elapses without activity, the session is gracefully disconnected.
+**Capture and Command Processing.** The capture loop (`run_watch_loop`) supports two event sources — direct gRPC streaming from Control-Center or Kafka consumption (cloud_primary mode). In gRPC mode, the `WatchStream` connects directly to the Control-Center WatchCommands endpoint, presenting a `monitor`-scoped bearer token and negotiating the transport (see [Control-Center compatibility](#control-center-compatibility)); the stream must be established before `start` reports success, so a session can never come up `active` while recording nothing. In Kafka mode, `StreamConsumer` subscribes to the `control-center-events` topic, consuming from the partition keyed to the session's `session_id`. Position-only events are silently dropped; heartbeat-only messages from Control-Center are filtered before any processing. For each non-position event, the capture loop writes four files atomically: `raw_input.md` (raw command string), `converted_input.md` (human-readable), `actuation_commands.json` (full CommandEvent JSON), and `cc_commands.json` (Control-Center replay format). The `convert` module normalizes key names per OS (`humanize_key`) and generates grammatically correct human-readable descriptions. Silence detection monitors the time since the last non-position event; if the configurable `silence_timeout_seconds` elapses without activity, the session is gracefully disconnected.
 
 **Three-Frame Image Capture and Annotation.** For each step, `VisionPipeline` evaluates a `FetchDecision` — based on action type, event timestamp, and per-type timing offsets — and issues three HTTP requests to The-Eyes' `/frames/closest` endpoint. The `before` frame is fetched at `timestamp - 1000ms`, the `at` frame at the exact event timestamp (plus a press or type delay for keyboard events), and the `after` frame at `timestamp + 1000ms`. For mouse events, `marker.rs` annotates the `at` frame in Rust: a filled red circle is drawn at the click coordinates, a directional arrow is drawn from the circle edge toward the least-crowded screen quadrant, and a coordinate box is rendered with the numeric X/Y values. The annotated frame is re-encoded to PNG. Before/after frame fetch failures are logged in `metadata.json` under `skipped_image_fetches[]` but do not block the `at` frame or the step record. A `closing_state.webp` is fetched on the `done` command.
 
@@ -1138,6 +1141,11 @@ Tool addresses:
   --the-eyes-poll-interval INT   Liveness poll interval in seconds  [default: 10]
   --silence-timeout       INT    CC silence timeout in seconds  [default: 30]
 
+Control-Center authentication (required by CC 1.1.0+):
+  --control-center-token  TEXT   JWT for CC; needs the 'monitor' scope
+  --control-center-tls-ca TEXT   PEM CA that signed the CC certificate
+  --control-center-security TEXT auto | strict | legacy  [default: auto]
+
 Cloud — general:
   --cloud                 TEXT   aws | azure | gcp
 
@@ -1361,6 +1369,9 @@ When `memory-archive annotator claim` is used (remote mode), the TUI starts a da
 | `ma_core_addr` | `--ma-core-addr` | Remote ma-core address (host:port) for annotator machines | remote | — |
 | `ipc_server_fingerprint` | `--ipc-server-fingerprint` | SHA-256 TLS cert fingerprint (AA:BB:CC:...) | remote | — |
 | `control_center_addr` | `--control-center-addr` | CC gRPC global fallback address | both | — |
+| `control_center_token` | `--control-center-token` | JWT presented to CC; the `monitor` scope is **required by CC 1.1.0+** and ignored by 1.0.0 | both | — |
+| `control_center_tls_ca` | `--control-center-tls-ca` | PEM CA that signed the CC server certificate; empty uses the system trust store | both | — |
+| `control_center_security` | `--control-center-security` | Transport policy: `auto` (TLS, fall back to plaintext with a warning) / `strict` (TLS only) / `legacy` (plaintext only) | both | `auto` |
 | `the_eyes_addr` | `--the-eyes-addr` | The-Eyes HTTP global fallback address | both | — |
 | `the_eyes_poll_interval_seconds` | `--the-eyes-poll-interval` | The-Eyes liveness poll interval (seconds) | both | `10` |
 | `silence_timeout_seconds` | `--silence-timeout` | CC silence before graceful disconnect (seconds) | both | `30` |
@@ -1394,6 +1405,51 @@ When `memory-archive annotator claim` is used (remote mode), the TUI starts a da
 | `observability.upload_queue_warn` | config.json only | Cloud upload queue depth alert threshold | both | — |
 | `observability.ipc_push_queue_warn` | config.json only | IPC push queue depth alert threshold | both | — |
 | `annotator_mgmt_port` | config.json only | Annotator management REST API port | both | `9002` |
+
+### Control-Center Compatibility
+
+Memory Archive supports **Control-Center 1.0.0, 1.1.0 and 1.2.0** from a single configuration. Two regimes exist, and the boundary is 1.1.0:
+
+| | 1.0.0 | 1.1.0 | 1.2.0 |
+|---|---|---|---|
+| TLS on the gRPC listener | not supported | **required** | **required** |
+| `monitor` scope on `WatchCommands` | not enforced | **required** | **required** |
+| `CommandEvent` wire format | identical | identical | identical |
+| `position_captured` meaning | best-effort readback | best-effort readback | **verified, or `false`** |
+
+**Configure once, works everywhere:**
+
+```bash
+# The monitor-scoped token. Ignored by 1.0.0, required by 1.1.0+, so always set it.
+memory-archive config --control-center-token "$(CC_JWT_SECRET=<cc-jwt-secret> \
+  control-center token generate --user ma-core --scopes monitor --expires 8760 | head -1)"
+
+# Only needed when the Control-Center certificate is signed by a private CA —
+# which is what `control-center gen-certs` produces. Omit for a public certificate.
+memory-archive config --control-center-tls-ca ~/.config/control-center/tls/ca.crt
+```
+
+**Transport negotiation.** The version cannot be discovered before connecting — `Ping` carries no version and `GetServerIdentity` is itself scope-gated — so the transport is negotiated rather than derived from a version number. Under the default `auto` policy the stream attempts TLS first and falls back to plaintext **only** when the transport itself fails, logging a warning that names the downgrade. A rejected token never triggers a fallback: the server answered, so a weaker transport would not help.
+
+The URL scheme in `control_center_addr` does **not** pin the transport under `auto` — an address written `http://` is still tried over TLS first, so pointing an existing configuration at an upgraded server needs no edit. Use `strict` to refuse any downgrade, or `legacy` to force plaintext.
+
+**The token travels only over an encrypted channel, or over plaintext you asked for by name.** On an automatic downgrade the credential is withheld and a warning is logged. An automatic downgrade is not consent: an attacker able to disrupt the TLS handshake would otherwise force the fallback and collect a `monitor`-scoped token in the clear — and that token subscribes to `WatchCommands`, which carries every keystroke a session records. Withholding costs nothing against a genuine 1.0.0 server, which does not check the token. If you are running 1.1.0+ with `CC_ALLOW_INSECURE=true` and therefore need the token over plaintext, set `control_center_security = "legacy"` to say so deliberately.
+
+| Policy | Behaviour | Use when |
+|---|---|---|
+| `auto` (default) | TLS, then plaintext with a warning; token withheld on the fallback | Mixed or unknown Control-Center versions |
+| `strict` | TLS only; a transport failure is fatal | Untrusted networks; downgrade must be impossible |
+| `legacy` | Plaintext only; token sent in the clear by explicit choice | Control-Center 1.0.0, or 1.1.0+ started with `CC_ALLOW_INSECURE=true` |
+
+**Diagnosing a failure.** `memory-archive start` exits non-zero and names the setting to change:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `rejected the credentials for WatchCommands` | CC 1.1.0+ with no/invalid token | Set `control_center_token` with the `monitor` scope |
+| `the server refused a plaintext connection` | CC 1.1.0+ reached without TLS | Use `auto` or `strict`; check the address |
+| `the server certificate was not trusted` | Private CA not configured | Point `control_center_tls_ca` at `ca.crt` |
+
+**Interpreting older sessions.** `position_captured` changed meaning in 1.2.0: before it, the agent reported whatever the cursor readback returned; from 1.2.0 it reports `false` rather than publishing a coordinate it could not verify. Because `mouse_x`/`mouse_y` are non-optional, an uncaptured position is carried as `(0, 0)` — a real screen coordinate. Always read `position_captured` before the coordinates. Sessions recorded by 0.14.0 onward store `actuation_agent_version` and `actuation_transport` in `metadata.json` so the regime is recoverable; sessions recorded earlier leave both empty.
 
 ### Environment Variables
 
@@ -1540,6 +1596,8 @@ os_environment_id           opaque environment identifier
 capture_server_id           The-Eyes server identifier
 capture_server_addr         The-Eyes HTTP address (per-session override or global config)
 actuation_server_id         Control-Center server identifier
+actuation_agent_version     Control-Center agent version that produced the steps
+actuation_transport         capture stream transport: tls | plaintext
 the_eyes_addr               The-Eyes HTTP address
 reasoning_model_id          VLM model ID used (automated mode)
 memory_name                 directory name for this memory

@@ -3,6 +3,105 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] — 2026-07-27
+
+Control-Center 1.1.0+ compatibility, and the silent capture failure it exposed.
+
+### Fixed
+
+- **No steps were recorded against Control-Center 1.1.0 or 1.2.0.** Control-Center
+  1.1.0 made TLS mandatory on the gRPC listener and added
+  `require_scope(&claims, "monitor")` to `WatchCommands`. `WatchStream::try_connect`
+  called `ControlServiceClient::connect` with no TLS configuration and issued
+  `watch_commands` with no credentials, so the subscription was refused and the
+  capture loop exited. Sessions still registered, still reported `status: active`,
+  and recorded nothing. Confirmed by inspection of the live process: with a watch
+  running, ma-core held no socket to the Control-Center port at all. The stream now
+  presents a bearer token and negotiates the transport. Verified end-to-end against
+  real 1.0.0 and 1.2.0 servers from a single unchanged configuration.
+
+- **A watch that could not subscribe reported success.** The IPC handler spawned the
+  capture loop and immediately answered `WatchStarted` — the gRPC subscription
+  happens inside that task and had not been attempted yet, so the reply could not
+  reflect it. On failure the loop logged an error and returned, leaving the session
+  at `active` in Redis with a dead loop behind it and nothing surfaced to the
+  operator. The loop now signals readiness over a oneshot channel; the handler waits
+  for it, answers `WATCH_START_FAILED` with the underlying cause, and marks the
+  session `incomplete` (the status the shutdown path already uses for an interrupted
+  session) rather than stranding it `active`. `memory-archive start` exits non-zero.
+
+- **Click markers could be drawn where the pointer never was.** The vision pipeline
+  marked an at-frame for every mouse event using `mouse_x`/`mouse_y` without reading
+  `position_captured`. Those fields are non-optional, so an uncaptured position
+  arrives as `(0, 0)` — a valid screen coordinate, the top-left corner — and the
+  marker landed there. Control-Center 1.2.0 reports `position_captured=false`
+  whenever the cursor readback cannot be verified, which makes an unverified
+  position ordinary rather than exceptional. The frame is still captured; only the
+  marker is withheld.
+
+- **`memory-archive server logs` presented stale output as current.** The command
+  reads `~/.memory-archive/ma-core.log`, which only daemon mode writes; a foreground
+  ma-core logs to its own stdout. With a live foreground daemon the command printed
+  a previous run's file with no indication of its age — during this investigation it
+  displayed five-day-old content while the failure being diagnosed went unlogged. It
+  now warns when the file predates the running process.
+
+- **Installer PATH persistence.** `install.sh` and `install.ps1` decided whether to
+  write the PATH entry by checking the current process `$PATH` (or `$env:PATH`). A
+  shell that had run an earlier install already had the directory exported, so the
+  entry was skipped and every fresh terminal lacked it. Persistence is now driven by
+  the shell rc file and the Windows registry.
+
+### Added
+
+- `control_center_token` — JWT presented to Control-Center. The `monitor` scope is
+  required by 1.1.0+ and ignored by 1.0.0, so it is safe to set unconditionally.
+- `control_center_tls_ca` — PEM CA that signed the Control-Center certificate.
+  Empty uses the system trust store; a private CA (what `control-center gen-certs`
+  produces) must be named explicitly.
+- `control_center_security` — transport policy: `auto` (default), `strict`,
+  `legacy`. Under `auto` the stream tries TLS first and falls back to plaintext only
+  on a transport-level failure, logging a warning that names the downgrade. A
+  rejected token never triggers a fallback, because the server answered and a weaker
+  transport cannot help. `strict` refuses any downgrade; `legacy` forces plaintext.
+- `actuation_agent_version` and `actuation_transport` in `metadata.json`.
+  `position_captured` means "best-effort readback" before Control-Center 1.2.0 and
+  "verified, or false" from 1.2.0 onward, so recorded coordinates cannot be
+  interpreted correctly without knowing which produced them. Empty for sessions
+  recorded before this release.
+- `--control-center-token`, `--control-center-tls-ca` and
+  `--control-center-security` on `memory-archive config`.
+
+### Security
+
+- **The Control-Center token is never sent over an unencrypted connection that was
+  not asked for.** Under `auto`, a downgrade to plaintext withholds the credential
+  and logs a warning. An automatic downgrade is not consent: an attacker able to
+  disrupt the TLS handshake could otherwise force the fallback and collect a
+  `monitor`-scoped token in the clear, and that token subscribes to
+  `WatchCommands` — every keystroke a session records, including anything typed
+  into a password field while capture is running. Withholding costs nothing
+  against a genuine 1.0.0 server, which does not check the token; an operator who
+  needs the token over plaintext (1.1.0+ with `CC_ALLOW_INSECURE=true`) opts in
+  with `control_center_security = "legacy"`.
+
+- **`CcEndpoint` no longer derives `Debug`.** The struct holds the token, and a
+  derived impl meant any future `?cc` at a `tracing` call site would publish the
+  credential in plaintext. `Debug` is now written by hand and renders the token as
+  `(redacted)` or `(unset)`. A test asserts the token cannot appear.
+
+### Notes
+
+- **The URL scheme no longer pins the transport under `auto`.** An address written
+  `http://` is still attempted over TLS first, so an existing configuration reaches
+  an upgraded server without being edited. Use `strict` or `legacy` to pin.
+- **No new dependencies.** Enabling tonic's `tls`/`tls-roots` features added no
+  packages to `Cargo.lock` — the rustls stack was already present through the cloud
+  SDKs — so the cross-compilation matrix is unaffected.
+- **Existing configurations need no migration.** All three keys default when absent.
+- **Sessions recorded before this release remain valid.** S001-era captures were
+  produced against Control-Center 1.0.0 and are unaffected.
+
 ## [0.13.2] — 2026-07-14
 
 Critical updater hotfix: `memory-archive update` was breaking every install it

@@ -59,12 +59,26 @@ fn normalize_addr(addr: &str, transport: Transport) -> String {
 }
 
 /// Everything needed to reach Control-Center, resolved from [`crate::config::Config`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CcEndpoint {
     pub addr: String,
     pub tls_ca: String,
     pub token: String,
     pub security: CcSecurity,
+}
+
+// Debug is written by hand so the token cannot reach a log through a derived
+// impl. `tracing` prints whatever it is handed, and a future `?cc` at any call
+// site would otherwise publish the credential in plaintext.
+impl std::fmt::Debug for CcEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CcEndpoint")
+            .field("addr", &self.addr)
+            .field("tls_ca", &self.tls_ca)
+            .field("token", &if self.token.is_empty() { "(unset)" } else { "(redacted)" })
+            .field("security", &self.security)
+            .finish()
+    }
 }
 
 /// Which wire the attempt used. Recorded as session provenance.
@@ -259,15 +273,35 @@ impl WatchStream {
 
         let mut client = ControlServiceClient::new(channel);
 
-        // Control-Center 1.1.0+ requires the `monitor` scope here. 1.0.0 never reads
-        // the header, so sending it unconditionally is safe at every version.
+        // Control-Center 1.1.0+ requires the `monitor` scope here; 1.0.0 never reads
+        // the header.
+        //
+        // The credential travels only over an encrypted channel, or over plaintext
+        // the operator asked for by name. An automatic downgrade is not consent: an
+        // attacker able to disrupt the TLS handshake would otherwise force the
+        // fallback and collect a `monitor`-scoped token in the clear — and that
+        // token subscribes to WatchCommands, which carries every keystroke the
+        // session records. Withholding it costs nothing against a genuine 1.0.0
+        // server, which does not check it.
+        let credentials_allowed = transport == Transport::Tls || cc.security == CcSecurity::Legacy;
+
         let mut request = Request::new(WatchRequest {});
         if !cc.token.is_empty() {
-            let value = format!("Bearer {}", cc.token)
-                .parse()
-                .context("control_center_token is not a valid HTTP header value")
-                .map_err(ConnectFailure::Transport)?;
-            request.metadata_mut().insert("authorization", value);
+            if credentials_allowed {
+                let value = format!("Bearer {}", cc.token)
+                    .parse()
+                    .context("control_center_token is not a valid HTTP header value")
+                    .map_err(ConnectFailure::Transport)?;
+                request.metadata_mut().insert("authorization", value);
+            } else {
+                tracing::warn!(
+                    addr = %cc.addr,
+                    "Withholding the Control-Center token on an unencrypted fallback \
+                     connection. A server that requires it will refuse the stream; set \
+                     control_center_security = \"legacy\" to send credentials in the clear \
+                     deliberately."
+                );
+            }
         }
 
         let response = client.watch_commands(request).await.map_err(|status| {
@@ -395,5 +429,60 @@ mod tests {
         let failure = ConnectFailure::Transport(anyhow!("invalid peer certificate: UnknownIssuer"));
         let report = format!("{:#}", failure.into_report("https://host:50051", Transport::Tls));
         assert!(report.contains("control_center_tls_ca"), "got: {report}");
+    }
+
+    fn endpoint(security: CcSecurity) -> CcEndpoint {
+        CcEndpoint {
+            addr: "192.168.1.9:50051".to_string(),
+            tls_ca: String::new(),
+            token: "super-secret-jwt".to_string(),
+            security,
+        }
+    }
+
+    /// Mirrors the rule in `try_connect`: credentials travel over TLS, or over
+    /// plaintext only when the operator named it.
+    fn credentials_allowed(cc: &CcEndpoint, transport: Transport) -> bool {
+        transport == Transport::Tls || cc.security == CcSecurity::Legacy
+    }
+
+    #[test]
+    fn credentials_never_ride_an_automatic_downgrade() {
+        // The attack this closes: disrupt the TLS handshake, collect a
+        // monitor-scoped token in the clear, then subscribe to WatchCommands and
+        // read every recorded keystroke.
+        let cc = endpoint(CcSecurity::Auto);
+        assert!(credentials_allowed(&cc, Transport::Tls));
+        assert!(
+            !credentials_allowed(&cc, Transport::Plaintext),
+            "an auto downgrade must not carry the token"
+        );
+    }
+
+    #[test]
+    fn legacy_may_send_credentials_in_the_clear() {
+        // Explicit operator choice, so the credential is allowed to travel.
+        let cc = endpoint(CcSecurity::Legacy);
+        assert!(credentials_allowed(&cc, Transport::Plaintext));
+    }
+
+    #[test]
+    fn strict_only_ever_sends_over_tls() {
+        let cc = endpoint(CcSecurity::Strict);
+        assert!(credentials_allowed(&cc, Transport::Tls));
+        assert!(!credentials_allowed(&cc, Transport::Plaintext));
+    }
+
+    #[test]
+    fn debug_never_prints_the_token() {
+        let rendered = format!("{:?}", endpoint(CcSecurity::Auto));
+        assert!(
+            !rendered.contains("super-secret-jwt"),
+            "token leaked through Debug: {rendered}"
+        );
+        assert!(rendered.contains("(redacted)"), "got: {rendered}");
+
+        let empty = CcEndpoint { token: String::new(), ..endpoint(CcSecurity::Auto) };
+        assert!(format!("{empty:?}").contains("(unset)"));
     }
 }
