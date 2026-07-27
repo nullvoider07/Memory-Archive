@@ -3,7 +3,7 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.14.0] — 2026-07-27
+## [0.2.0] — 2026-07-27
 
 Control-Center 1.1.0+ compatibility, and the silent capture failure it exposed.
 

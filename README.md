@@ -6,11 +6,11 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.14.0  
+**Version:** 0.2.0  
 **Last Updated:** July 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.14.0** — Control-Center 1.1.0+ compatibility, and a silent capture failure closed:
+> **✨ What's new in 0.2.0** — Control-Center 1.1.0+ compatibility, and a silent capture failure closed:
 > - **Capture works against every Control-Center release (1.0.0, 1.1.0, 1.2.0) from one configuration.** Control-Center 1.1.0 made TLS mandatory and put a `monitor` scope on `WatchCommands`; Memory Archive connected in plaintext with no credentials, so **every session against 1.1.0+ recorded zero steps**. The capture stream now presents a bearer token and negotiates the transport — TLS first, falling back to plaintext only when the transport itself fails, and never silently. Set `control_center_token` (and `control_center_tls_ca` for a private CA); see [Control-Center compatibility](#control-center-compatibility).
 > - **A watch that cannot subscribe now fails loudly instead of looking healthy.** `memory-archive start` previously returned success the moment the loop was spawned, before the gRPC subscription was attempted. A failure left the session sitting at `active`, recording nothing, with the error visible nowhere — the operator only found out by noticing an empty trace. `start` now waits for the event source to come up, exits non-zero with the cause, and marks the session `incomplete` rather than stranding it `active`.
 > - **Frames are no longer marked at a position the pointer never occupied.** `mouse_x`/`mouse_y` are non-optional, so an uncaptured position arrives as `(0, 0)` — a real coordinate, the top-left corner. Control-Center 1.2.0 reports `position_captured=false` whenever it cannot verify the readback, which makes that common rather than rare. The click marker is now drawn only when the position was verified; the frame is still captured either way.
@@ -1449,7 +1449,7 @@ The URL scheme in `control_center_addr` does **not** pin the transport under `au
 | `the server refused a plaintext connection` | CC 1.1.0+ reached without TLS | Use `auto` or `strict`; check the address |
 | `the server certificate was not trusted` | Private CA not configured | Point `control_center_tls_ca` at `ca.crt` |
 
-**Interpreting older sessions.** `position_captured` changed meaning in 1.2.0: before it, the agent reported whatever the cursor readback returned; from 1.2.0 it reports `false` rather than publishing a coordinate it could not verify. Because `mouse_x`/`mouse_y` are non-optional, an uncaptured position is carried as `(0, 0)` — a real screen coordinate. Always read `position_captured` before the coordinates. Sessions recorded by 0.14.0 onward store `actuation_agent_version` and `actuation_transport` in `metadata.json` so the regime is recoverable; sessions recorded earlier leave both empty.
+**Interpreting older sessions.** `position_captured` changed meaning in 1.2.0: before it, the agent reported whatever the cursor readback returned; from 1.2.0 it reports `false` rather than publishing a coordinate it could not verify. Because `mouse_x`/`mouse_y` are non-optional, an uncaptured position is carried as `(0, 0)` — a real screen coordinate. Always read `position_captured` before the coordinates. Sessions recorded by 0.2.0 onward store `actuation_agent_version` and `actuation_transport` in `metadata.json` so the regime is recoverable; sessions recorded earlier leave both empty.
 
 ### Environment Variables
 

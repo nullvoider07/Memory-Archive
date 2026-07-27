@@ -20,7 +20,7 @@ from rich.console import Console
 try:
     from ma_app import __version__
 except ImportError:
-    __version__ = "0.14.0"
+    __version__ = "0.2.0"
 
 # =============================================================================
 # Constants

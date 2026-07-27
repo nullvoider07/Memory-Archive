@@ -93,7 +93,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Fails the build on any advisory. Two of the three found in 0.14.0 were
+      # Fails the build on any advisory. Two of the three found in 0.2.0 were
       # certificate-validation bypasses on the path that verifies the
       # Control-Center server certificate, so this gate is not advisory-only.
       - uses: rustsec/audit-check@v2
