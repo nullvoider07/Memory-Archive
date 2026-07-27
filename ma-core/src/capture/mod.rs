@@ -7,7 +7,7 @@ pub mod writer;
 
 pub use disconnect::DisconnectHandler;
 pub use session_state::CaptureState;
-pub use stream::{DisconnectReason, WatchStream};
+pub use stream::{CcEndpoint, DisconnectReason, WatchStream};
 pub use writer::CommandWriter;
 
 use std::collections::HashMap;
@@ -158,6 +158,19 @@ impl EventSource {
     }
 }
 
+/// Report whether the event source came up, so the caller can answer the client
+/// with the truth instead of assuming the spawn succeeded.
+///
+/// Sent exactly once: `Ok` when events can actually flow, `Err(reason)` when the
+/// loop gives up before that point.
+pub type WatchReady = oneshot::Sender<Result<(), String>>;
+
+fn signal_ready(slot: &mut Option<WatchReady>, outcome: Result<(), String>) {
+    if let Some(tx) = slot.take() {
+        let _ = tx.send(outcome);
+    }
+}
+
 pub async fn run_watch_loop(
     session_id: String,
     mut registry: SessionRegistry,
@@ -167,11 +180,15 @@ pub async fn run_watch_loop(
     kafka_session_map: KafkaSessionMap,
     storage: Arc<dyn StorageBackend>,
     reasoning_maps: ReasoningMapsRef,
+    ready_tx: Option<WatchReady>,
 ) {
+    let mut ready_tx = ready_tx;
+
     let record = match registry.get(&session_id).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(session_id = %session_id, "Watch loop: failed to get session: {e}");
+            signal_ready(&mut ready_tx, Err(format!("failed to load session: {e}")));
             return;
         }
     };
@@ -270,28 +287,43 @@ pub async fn run_watch_loop(
     } else {
         let cc_addr = effective_cc_addr.clone();
         if cc_addr.is_empty() {
-            tracing::error!(
-                session_id = %session_id,
-                "control_center_addr not set — run: memory-archive config --control-center-addr http://<host>:<port>"
-            );
+            let reason = "control_center_addr not set — run: memory-archive config \
+                          --control-center-addr https://<host>:<port>"
+                .to_string();
+            tracing::error!(session_id = %session_id, "{reason}");
+            signal_ready(&mut ready_tx, Err(reason));
             return;
         }
         let silence_timeout = Duration::from_secs(config.silence_timeout_seconds);
-        match WatchStream::connect(cc_addr.clone(), silence_timeout).await {
+        let cc = CcEndpoint {
+            addr: cc_addr.clone(),
+            tls_ca: config.control_center_tls_ca.clone(),
+            token: config.control_center_token.clone(),
+            security: config.control_center_security,
+        };
+        match WatchStream::connect(cc, silence_timeout).await {
             Ok(s) => {
                 tracing::info!(
                     session_id = %session_id,
                     cc_addr = %cc_addr,
+                    transport = s.transport().as_str(),
                     "Watch loop: using direct gRPC event source"
                 );
+                state.set_actuation_transport(s.transport().as_str());
                 EventSource::Grpc(s)
             }
             Err(e) => {
-                tracing::error!(session_id = %session_id, "Failed to connect to Control-Center at {cc_addr}: {e}");
+                let reason = format!("{e:#}");
+                tracing::error!(session_id = %session_id, "Failed to connect to Control-Center at {cc_addr}: {reason}");
+                signal_ready(&mut ready_tx, Err(reason));
                 return;
             }
         }
     };
+
+    // Events can flow from here on. Everything above could still have failed
+    // silently; nothing below is allowed to.
+    signal_ready(&mut ready_tx, Ok(()));
 
     let is_automated = record.mode == crate::registry::schema::SessionMode::Automated;
 
@@ -395,6 +427,12 @@ pub async fn run_watch_loop(
                     None => break,
                     Some(ep) => {
                         let event = ep.event;
+
+                        // Recorded before the position filter: a "position" event
+                        // still carries the agent version, and dropping it here
+                        // would lose the provenance for a session that opened with
+                        // one.
+                        state.record_agent_version(&event.agent_version);
 
                         if event.action_type == "position" {
                             continue

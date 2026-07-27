@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.13.2"
+version = "0.14.0"
 edition = "2024"
 authors = ["Kartik (NullVoider)"]
 license = "Apache-2.0"
@@ -47,7 +47,10 @@ google-cloud-storage = "1.7"
 bytes = "1"
 
 # gRPC + protobuf
-tonic = "0.12"
+# "tls" is not a default feature; ClientTlsConfig is needed to reach a
+# Control-Center 1.1.0+ server, which refuses plaintext. "tls-roots" pulls in the
+# system trust store for the case where the server certificate is publicly signed.
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
 prost = "0.13"
 prost-types = "0.13"
 

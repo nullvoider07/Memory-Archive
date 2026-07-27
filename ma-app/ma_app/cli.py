@@ -9,7 +9,7 @@ from rich.console import Console
 try:
     from ma_app import __version__
 except ImportError:
-    __version__ = "0.13.2"
+    __version__ = "0.14.0"
 
 app = typer.Typer(
     name="memory-archive",
@@ -858,7 +858,10 @@ def status(
 def config(
     storage_path: str = typer.Option(None, "--storage-path", help="Local path for memory storage"),
     storage_mode: str = typer.Option(None, "--storage-mode", help="Storage mode: local | cloud_primary"),
-    control_center_addr: str = typer.Option(None, "--control-center-addr", help="Control-Center gRPC address e.g. http://127.0.0.1:50051"),
+    control_center_addr: str = typer.Option(None, "--control-center-addr", help="Control-Center gRPC address e.g. https://127.0.0.1:50051"),
+    control_center_token: str = typer.Option(None, "--control-center-token", help="JWT for Control-Center; needs the 'monitor' scope on 1.1.0+"),
+    control_center_tls_ca: str = typer.Option(None, "--control-center-tls-ca", help="PEM CA that signed the Control-Center certificate (from 'control-center gen-certs')"),
+    control_center_security: str = typer.Option(None, "--control-center-security", help="Transport policy: auto | strict | legacy (default: auto)"),
     the_eyes_addr: str = typer.Option(None, "--the-eyes-addr", help="The-Eyes HTTP server address e.g. http://127.0.0.1:8080"),
     the_eyes_poll_interval: int = typer.Option(None, "--the-eyes-poll-interval", help="The-Eyes liveness poll interval in seconds (default: 10)"),
     cloud: str = typer.Option(None, "--cloud", help="Cloud provider: aws | azure | gcp"),
@@ -913,6 +916,26 @@ def config(
         changed = True
     if control_center_addr:
         settings.control_center_addr = control_center_addr
+        changed = True
+    if control_center_token:
+        settings.control_center_token = control_center_token
+        changed = True
+    if control_center_tls_ca:
+        ca = Path(control_center_tls_ca).expanduser()
+        if not ca.is_file():
+            console.print(f"[red]TLS CA file not found: {ca}[/red]")
+            raise typer.Exit(code=1)
+        settings.control_center_tls_ca = str(ca)
+        changed = True
+    if control_center_security:
+        choice = control_center_security.strip().lower()
+        if choice not in ("auto", "strict", "legacy"):
+            console.print(
+                f"[red]Invalid --control-center-security: {control_center_security}[/red]\n"
+                "  Expected one of: auto | strict | legacy"
+            )
+            raise typer.Exit(code=1)
+        settings.control_center_security = choice
         changed = True
     if the_eyes_addr:
         settings.the_eyes_addr = the_eyes_addr
@@ -1527,6 +1550,25 @@ def server_logs(
             "  Start as daemon with: memory-archive server start --daemon"
         )
         raise typer.Exit(code=1)
+
+    # A log file that predates the running process belongs to an earlier run. Only
+    # daemon mode redirects into it, so a foreground ma-core leaves this file
+    # untouched and the output below is history, not the current session. Showing
+    # it unlabelled has already hidden a live failure once.
+    pid_path = Path.home() / ".memory-archive" / "ma-core.pid"
+    if pid_path.exists():
+        try:
+            running_pid = int(pid_path.read_text().strip())
+            os.kill(running_pid, 0)  # signal 0 — liveness check only
+            if log_path.stat().st_mtime < pid_path.stat().st_mtime:
+                console.print(
+                    f"[yellow]These logs predate the running ma-core (PID {running_pid}).[/yellow]\n"
+                    "  Only daemon mode writes to this file, so a foreground ma-core\n"
+                    "  logs to its own stdout instead. What follows is an earlier run.\n"
+                    "  For live logs: memory-archive server start --daemon\n"
+                )
+        except (ProcessLookupError, PermissionError, ValueError, OSError):
+            pass  # No live daemon to compare against — show the file as-is.
 
     import sys
     import time

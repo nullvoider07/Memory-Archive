@@ -19,6 +19,23 @@ pub struct Config {
     #[serde(default)]
     pub control_center_addr: String,
 
+    /// PEM file holding the CA that signed the Control-Center server certificate.
+    /// Empty uses the system trust store, which is correct for a publicly-signed
+    /// certificate and wrong for the self-signed one `control-center gen-certs`
+    /// produces.
+    #[serde(default)]
+    pub control_center_tls_ca: String,
+
+    /// JWT presented to Control-Center. Control-Center 1.1.0 and later require the
+    /// `monitor` scope on WatchCommands; 1.0.0 ignores the header entirely, so this
+    /// is safe to send at every version.
+    #[serde(default)]
+    pub control_center_token: String,
+
+    /// Transport policy for the Control-Center connection. See [`CcSecurity`].
+    #[serde(default = "defaults::control_center_security")]
+    pub control_center_security: CcSecurity,
+
     #[serde(default)]
     pub the_eyes_addr: String,
 
@@ -89,6 +106,9 @@ impl Default for Config {
             ipc_socket_path: defaults::ipc_socket_path(),
             storage_path: defaults::storage_path(),
             control_center_addr: String::new(),
+            control_center_tls_ca: String::new(),
+            control_center_token: String::new(),
+            control_center_security: defaults::control_center_security(),
             the_eyes_addr: String::new(),
             the_eyes_poll_interval_seconds: defaults::the_eyes_poll_interval_seconds(),
             silence_timeout_seconds: defaults::silence_timeout_seconds(),
@@ -107,6 +127,26 @@ impl Default for Config {
             observability: ObservabilityConfig::default(),
         }
     }
+}
+
+/// Transport policy for the Control-Center connection.
+///
+/// Control-Center 1.0.0 serves plaintext and has no TLS support; 1.1.0 and later
+/// refuse plaintext unless started with `CC_ALLOW_INSECURE=true`. The version is
+/// not discoverable before connecting — `Ping` carries no version and
+/// `GetServerIdentity` is itself scope-gated — so the transport is negotiated
+/// rather than derived from a version number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CcSecurity {
+    /// Try TLS, fall back to plaintext once if the transport itself fails.
+    /// The downgrade is logged at WARN and never happens silently.
+    Auto,
+    /// TLS only. A transport failure is fatal; no downgrade is attempted.
+    Strict,
+    /// Plaintext only. For a Control-Center 1.0.0 server, or 1.1.0+ started with
+    /// `CC_ALLOW_INSECURE=true`.
+    Legacy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,6 +284,10 @@ mod defaults {
 
     pub fn redis_url() -> String {
         "redis://127.0.0.1:6379".to_string()
+    }
+
+    pub fn control_center_security() -> super::CcSecurity {
+        super::CcSecurity::Auto
     }
 
     pub fn ipc_socket_path() -> String {

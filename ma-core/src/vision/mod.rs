@@ -32,7 +32,7 @@ pub fn decide(event: &CommandEvent, press_delay_ms: u64, type_delay_ms: u64) -> 
     }
 
     match event.action_type.as_str() {
-        // Every mouse interaction captures a marked at-frame. The mark is drawn at
+        // Every mouse interaction captures an at-frame. The mark is drawn at
         // event.mouse_x/mouse_y — the acted-on position: the click point for
         // left/right/double/middle/triple, the destination for "move" and "drag"
         // (CC drag reports its endpoint as position_captured), the press/release
@@ -40,7 +40,16 @@ pub fn decide(event: &CommandEvent, press_delay_ms: u64, type_delay_ms: u64) -> 
         // catch-all so any current or future mouse subtype is captured rather than
         // silently dropped as frameless — hold/release/drag/scroll/middle/triple
         // steps previously landed in the corpus without visual context.
-        "mouse" => FetchDecision::FetchAt { mark: true },
+        //
+        // The mark is conditional on position_captured. mouse_x/mouse_y are
+        // non-optional int32, so an uncaptured position arrives as (0, 0) — a real
+        // screen coordinate, the top-left corner — and marking it would stamp the
+        // frame in a place the pointer never was. Control-Center 1.2.0 reports
+        // position_captured=false whenever it could not verify the readback, which
+        // makes an unverified position common rather than exceptional.
+        "mouse" => FetchDecision::FetchAt {
+            mark: event.position_captured,
+        },
         "keyboard" => match event.action_subtype.as_str() {
             "type"  => FetchDecision::FetchAfter { delay_ms: type_delay_ms },
             "press" => FetchDecision::FetchAfter { delay_ms: press_delay_ms },
@@ -504,11 +513,29 @@ mod tests {
     use super::*;
     use ma_proto::control_center::CommandEvent;
 
+    /// A command whose position the agent verified — the ordinary mouse case.
     fn ev(action_type: &str, action_subtype: &str, success: bool) -> CommandEvent {
         CommandEvent {
             action_type: action_type.to_string(),
             action_subtype: action_subtype.to_string(),
             success,
+            position_captured: true,
+            mouse_x: 400,
+            mouse_y: 300,
+            ..Default::default()
+        }
+    }
+
+    /// A command the agent could not confirm a position for. Control-Center 1.2.0
+    /// reports this as position_captured=false with mouse_x/mouse_y left at (0, 0).
+    fn ev_unverified(action_type: &str, action_subtype: &str) -> CommandEvent {
+        CommandEvent {
+            action_type: action_type.to_string(),
+            action_subtype: action_subtype.to_string(),
+            success: true,
+            position_captured: false,
+            mouse_x: 0,
+            mouse_y: 0,
             ..Default::default()
         }
     }
@@ -564,6 +591,38 @@ mod tests {
     fn test_mouse_unknown_subtype_still_fetches() {
         // Catch-all: any future mouse subtype captures a frame rather than being dropped.
         assert_eq!(decide(&ev("mouse", "quadruple", true), 500, 1000), FetchDecision::FetchAt { mark: true });
+    }
+
+    #[test]
+    fn test_unverified_position_fetches_without_marking() {
+        // (0, 0) is a real coordinate — the top-left corner — so marking an
+        // unverified position would stamp the frame where the pointer never was.
+        // The frame is still captured; only the mark is withheld.
+        assert_eq!(
+            decide(&ev_unverified("mouse", "left"), 500, 1000),
+            FetchDecision::FetchAt { mark: false }
+        );
+    }
+
+    #[test]
+    fn test_unverified_position_across_mouse_subtypes() {
+        for subtype in ["left", "right", "double", "move", "drag", "hold", "scroll_up"] {
+            assert_eq!(
+                decide(&ev_unverified("mouse", subtype), 500, 1000),
+                FetchDecision::FetchAt { mark: false },
+                "subtype {subtype} should fetch unmarked when the position is unverified"
+            );
+        }
+    }
+
+    #[test]
+    fn test_failed_command_skipped_regardless_of_position_flag() {
+        let mut event = ev_unverified("mouse", "left");
+        event.success = false;
+        assert!(matches!(
+            decide(&event, 500, 1000),
+            FetchDecision::Skip { .. }
+        ));
     }
 
     #[test]

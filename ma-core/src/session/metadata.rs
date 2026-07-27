@@ -33,6 +33,20 @@ pub struct SessionMetadata {
     #[serde(default)]
     pub ma_core_addr: String,
 
+    /// Control-Center agent version, taken from the first command event.
+    ///
+    /// Provenance, not diagnostics: `position_captured` means "best-effort cursor
+    /// readback" before Control-Center 1.2.0 and "verified, or false" from 1.2.0
+    /// onward. A consumer cannot interpret the recorded coordinates correctly
+    /// without knowing which produced them. Empty for sessions recorded before
+    /// this field existed.
+    #[serde(default)]
+    pub actuation_agent_version: String,
+
+    /// Transport the capture stream negotiated — "tls" or "plaintext".
+    #[serde(default)]
+    pub actuation_transport: String,
+
     // Timestamps
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,

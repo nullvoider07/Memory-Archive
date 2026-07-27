@@ -91,6 +91,11 @@ class Settings:
     storage_path: str = str(Path.home() / ".memory-archive" / "memories")
     storage_mode: str = "local"
     control_center_addr: str = ""
+    # Control-Center 1.1.0+ requires a token with the "monitor" scope on
+    # WatchCommands and refuses plaintext; 1.0.0 needs neither and ignores both.
+    control_center_token: str = ""
+    control_center_tls_ca: str = ""
+    control_center_security: str = "auto"
     the_eyes_addr: str = ""
     the_eyes_poll_interval_seconds: int = 10
     silence_timeout_seconds: int = 30
@@ -271,6 +276,9 @@ class Settings:
             ),
             storage_mode=data.get("storage_mode", "local"),
             control_center_addr=data.get("control_center_addr", ""),
+            control_center_token=data.get("control_center_token", ""),
+            control_center_tls_ca=data.get("control_center_tls_ca", ""),
+            control_center_security=data.get("control_center_security", "auto"),
             the_eyes_addr=data.get("the_eyes_addr", ""),
             the_eyes_poll_interval_seconds=int(data.get("the_eyes_poll_interval_seconds", 10)),
             silence_timeout_seconds=data.get("silence_timeout_seconds", 30),
@@ -301,6 +309,9 @@ class Settings:
             f"  storage_path             : {self.storage_path}",
             f"  storage_mode             : {self.storage_mode}",
             f"  control_center_addr      : {self.control_center_addr or '(not set)'}",
+            f"  control_center_token     : {'(set)' if self.control_center_token else '(not set — required by Control-Center 1.1.0+)'}",
+            f"  control_center_tls_ca    : {self.control_center_tls_ca or '(system roots)'}",
+            f"  control_center_security  : {self.control_center_security}",
             f"  the_eyes_addr            : {self.the_eyes_addr or '(not set)'}",
             f"  the_eyes_poll_interval_s  : {self.the_eyes_poll_interval_seconds}",
             f"  silence_timeout_seconds  : {self.silence_timeout_seconds}",

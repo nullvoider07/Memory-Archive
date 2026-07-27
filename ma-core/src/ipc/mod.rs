@@ -742,6 +742,14 @@ async fn handle_message(
                         .await
                         .insert(session_id.clone(), push_tx.clone());
 
+                    // Wait for the loop to report that events can actually flow.
+                    // Spawning only proves a task was created; the gRPC subscription
+                    // happens inside it and can fail. Answering WatchStarted before
+                    // that is how a session came up "active" while recording nothing.
+                    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
+                    let mut ready_registry = registry.clone();
+
                     tokio::spawn(crate::capture::run_watch_loop(
                         session_id.clone(),
                         registry,
@@ -751,7 +759,53 @@ async fn handle_message(
                         kafka_session_map,
                         storage,
                         reasoning_maps.clone(),
+                        Some(ready_tx),
                     ));
+
+                    match ready_rx.await {
+                        Ok(Ok(())) => {}
+                        // The loop reported a specific reason, or dropped the sender
+                        // by exiting early. Either way capture is not running, so the
+                        // session must not be left looking active.
+                        outcome => {
+                            let message = match outcome {
+                                Ok(Err(reason)) => reason,
+                                _ => "watch loop exited before the event source came up"
+                                    .to_string(),
+                            };
+
+                            push_handles.lock().await.remove(&session_id);
+
+                            // Incomplete is what the shutdown path already uses for a
+                            // session that was interrupted rather than finished.
+                            if let Err(e) = ready_registry
+                                .update_status(
+                                    &session_id,
+                                    crate::registry::schema::SessionStatus::Incomplete,
+                                )
+                                .await
+                            {
+                                tracing::error!(
+                                    session_id = %session_id,
+                                    "Failed to flag session after capture start failure: {e}"
+                                );
+                            }
+
+                            tracing::error!(
+                                session_id = %session_id,
+                                "Watch loop failed to start: {message}"
+                            );
+
+                            return OutboundMessage::Error {
+                                code: "WATCH_START_FAILED".to_string(),
+                                message: format!(
+                                    "Capture did not start, so no steps would be recorded: \
+                                     {message}"
+                                ),
+                            };
+                        }
+                    }
+
                     tracing::info!(session_id = %session_id, "Watch loop spawned");
                     OutboundMessage::WatchStarted {
                         session_id,

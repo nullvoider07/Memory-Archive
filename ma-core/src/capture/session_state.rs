@@ -194,6 +194,20 @@ impl CaptureState {
         self.metadata.closing_image_path = Some(path.to_string());
     }
 
+    /// Record which wire the capture stream negotiated.
+    pub fn set_actuation_transport(&mut self, transport: &str) {
+        self.metadata.actuation_transport = transport.to_string();
+    }
+
+    /// Record the Control-Center agent version, taken from the first event that
+    /// carries one. Later events repeat the same value, so only the first write
+    /// does any work.
+    pub fn record_agent_version(&mut self, version: &str) {
+        if self.metadata.actuation_agent_version.is_empty() && !version.is_empty() {
+            self.metadata.actuation_agent_version = version.to_string();
+        }
+    }
+
     pub fn mark_complete(&mut self) {
         self.metadata.status = "complete".to_string();
         self.metadata.completed_at = Some(Utc::now());

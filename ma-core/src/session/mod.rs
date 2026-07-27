@@ -143,6 +143,11 @@ fn build_initial_metadata(record: &SessionRecord) -> SessionMetadata {
         actuation_server_id: record.actuation_server_id.clone(),
         reasoning_model_id: record.reasoning_model_id.clone(),
         ma_core_addr: record.ma_core_addr.clone(),
+        // Both are learned from the live connection, not the registration record:
+        // the transport when the stream is negotiated, the agent version from the
+        // first command event.
+        actuation_agent_version: String::new(),
+        actuation_transport: String::new(),
         created_at: Utc::now(),
         completed_at: None,
         total_steps: 0,
