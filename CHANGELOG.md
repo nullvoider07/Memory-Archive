@@ -71,6 +71,15 @@ Control-Center 1.1.0+ compatibility, and the silent capture failure it exposed.
   recorded before this release.
 - `--control-center-token`, `--control-center-tls-ca` and
   `--control-center-security` on `memory-archive config`.
+- **A Control-Center compatibility test suite** under `integration-tests/`, run
+  against real released `control-center-server` binaries (1.0.0, 1.1.0, 1.2.0)
+  rather than mocks — a mock would only assert that the mock matches our belief
+  about Control-Center, and that belief is exactly what was wrong. It covers the
+  negotiated transport per version, the loud-failure path, the credential-
+  withholding rule, and that an `http://` address still reaches an upgraded
+  server. Tests pin Redis DB 15 and refuse to flush any other, so they cannot
+  reach the live session registry in DB 0. `integration-tests/stage-cc-releases.sh`
+  fetches the server binaries; everything skips cleanly when they are absent.
 
 ### Security
 
@@ -84,6 +93,25 @@ Control-Center 1.1.0+ compatibility, and the silent capture failure it exposed.
   against a genuine 1.0.0 server, which does not check the token; an operator who
   needs the token over plaintext (1.1.0+ with `CC_ALLOW_INSECURE=true`) opts in
   with `control_center_security = "legacy"`.
+
+- **Certificate-verification advisories on the new TLS path closed.** A
+  `cargo audit` of the dependency tree — the first this project has had — reported
+  nine advisories, six of them in `rustls-webpki`, the library that validates the
+  Control-Center server certificate. Two are certificate-validation bypasses
+  (`RUSTSEC-2026-0099`, name constraints accepted for a wildcard certificate;
+  `RUSTSEC-2026-0098`, URI name constraints incorrectly accepted) and one is a
+  reachable panic in CRL parsing (`RUSTSEC-2026-0104`). This release is what puts
+  that code on the hot path: before it, the Control-Center connection never
+  verified a certificate at all. `rustls-webpki` is now pinned to `0.103.13` on
+  that path, along with `crossbeam-epoch` `0.9.20` and `quinn-proto` `0.11.15`.
+  Nine advisories down to three.
+
+  The remaining three are the same `rustls-webpki` defects in `0.101.7`, reached
+  through `rustls 0.21` inside `aws-smithy-http-client` — the AWS SDK's own TLS
+  stack, used only in `cloud_primary` mode and **not** on the Control-Center path.
+  Clearing them requires a newer `aws-smithy` release that needs Rust 1.94.1,
+  above this project's current toolchain, so it is deliberately deferred rather
+  than taken as an unplanned toolchain bump inside a patch-level dependency fix.
 
 - **`CcEndpoint` no longer derives `Debug`.** The struct holds the token, and a
   derived impl meant any future `?cc` at a `tracing` call site would publish the
