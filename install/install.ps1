@@ -557,19 +557,16 @@ function Invoke-UpdatePath {
     Write-Step "Checking PATH"
 
     # Check whether INSTALL_DIR is already in the user's persistent PATH
-    # (Machine or User scope in the registry).
+    # (Machine or User scope in the registry). Persistence is driven solely by
+    # the registry, NOT by the current process $env:PATH: a session that ran an
+    # earlier install may already have INSTALL_DIR on its PATH while the registry
+    # (and every fresh PowerShell window) still lacks it.
     $currentUserPath = [System.Environment]::GetEnvironmentVariable("PATH", "User") ?? ""
     $currentMachinePath = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") ?? ""
 
     if ($currentUserPath -split ";" -contains $INSTALL_DIR -or
         $currentMachinePath -split ";" -contains $INSTALL_DIR) {
         Write-Ok "$INSTALL_DIR is already on your PATH."
-        return
-    }
-
-    # Also check the current process PATH in case it was set earlier.
-    if ($env:PATH -split ";" -contains $INSTALL_DIR) {
-        Write-Ok "$INSTALL_DIR is on the current session PATH."
         return
     }
 

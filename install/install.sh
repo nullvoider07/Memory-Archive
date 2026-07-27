@@ -575,17 +575,14 @@ install_components() {
 update_path() {
     print_step "Checking PATH"
 
-    # System-wide /usr/local/bin is already on PATH in virtually all distros.
-    # The user-local ~/.local/bin may not be — check and advise accordingly.
-    if [[ ":${PATH}:" == *":${INSTALL_DIR}:"* ]]; then
-        print_ok "${INSTALL_DIR} is already on your PATH."
-        return
-    fi
+    # INSTALL_DIR is ${MA_HOME}/bin — /opt/memory-archive/bin (root) or
+    # ~/.memory-archive/bin (user). Neither is on the default PATH, so the entry
+    # must be persisted to the shell rc file. Persistence is driven solely by
+    # whether the rc file already contains the entry, NOT by the current process
+    # $PATH: a shell that ran an earlier install may already have INSTALL_DIR
+    # exported while the rc file (and every fresh terminal) still lacks it.
 
-    # Only reached for the user-local case.
-    print_warn "${INSTALL_DIR} is not on your PATH."
-
-    # Detect the user's login shell and append to the correct rc file.
+    # Detect the user's login shell and select the correct rc file.
     local shell_rc=""
     case "${SHELL:-}" in
         */zsh)  shell_rc="${ZDOTDIR:-${HOME}}/.zshrc" ;;
@@ -596,10 +593,11 @@ update_path() {
     local path_export="export PATH=\"${INSTALL_DIR}:\${PATH}\""
     local fish_export="fish_add_path ${INSTALL_DIR}"
 
+    local rc_written=0
     if [[ "${SHELL:-}" == */fish ]]; then
+        mkdir -p "$(dirname "${shell_rc}")" 2>/dev/null || true
         if ! grep -qF "${INSTALL_DIR}" "${shell_rc}" 2>/dev/null; then
-            echo "${fish_export}" >> "${shell_rc}"
-            print_ok "Added fish_add_path to ${shell_rc}"
+            echo "${fish_export}" >> "${shell_rc}" && rc_written=1
         fi
     else
         if ! grep -qF "${INSTALL_DIR}" "${shell_rc}" 2>/dev/null; then
@@ -607,14 +605,22 @@ update_path() {
                 echo ""
                 echo "# Added by Memory Archive installer"
                 echo "${path_export}"
-            } >> "${shell_rc}"
-            print_ok "Added PATH export to ${shell_rc}"
+            } >> "${shell_rc}" && rc_written=1
         fi
+    fi
+
+    if [[ "${rc_written}" -eq 1 ]]; then
+        print_ok "Added ${INSTALL_DIR} to PATH in ${shell_rc}"
+        print_info "Run 'source ${shell_rc}' or open a new terminal for the PATH change to persist."
+    elif [[ ":${PATH}:" == *":${INSTALL_DIR}:"* ]]; then
+        print_ok "${INSTALL_DIR} is already on your PATH."
+    else
+        print_ok "${INSTALL_DIR} already configured in ${shell_rc}."
+        print_info "Run 'source ${shell_rc}' or open a new terminal to use it."
     fi
 
     # Export for the current shell session so the user can run immediately.
     export PATH="${INSTALL_DIR}:${PATH}"
-    print_info "Run 'source ${shell_rc}' or open a new terminal for the PATH change to persist."
 }
 
 # ============================================================================
