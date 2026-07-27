@@ -75,9 +75,12 @@ jobs:
         with:
           python-version: '3.13'
 
+      # ma-app must be installed, not just pytest: test_scaffolder.py imports the
+      # package, which pulls rich/typer with it.
       - name: Python tests
         run: |
           python3 -m pip install --upgrade pip pytest
+          python3 -m pip install ./ma-app
           python3 -m pytest ma-app/tests -q
 
   audit:
