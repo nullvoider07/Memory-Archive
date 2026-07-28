@@ -6,12 +6,14 @@ use anyhow::{anyhow, Context};
 use ma_proto::control_center::{
     control_service_client::ControlServiceClient,
     CommandEvent,
+    InfoRequest,
     WatchRequest,
 };
 use tokio::time::timeout;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
 use tonic::{Request, Streaming};
 
+use crate::capture::compat::{self, Compat};
 use crate::config::CcSecurity;
 
 // DisconnectReason
@@ -28,6 +30,7 @@ pub struct WatchStream {
     silence_timeout: Duration,
     disconnect_reason: Option<DisconnectReason>,
     transport: Transport,
+    server_version: String,
 }
 
 /// Transports to attempt, in order, for a given policy.
@@ -65,6 +68,10 @@ pub struct CcEndpoint {
     pub tls_ca: String,
     pub token: String,
     pub security: CcSecurity,
+    /// Raises the supported-version ceiling without a rebuild. Empty = compiled-in.
+    pub max_version: String,
+    /// Record even when the version gate refuses.
+    pub allow_unsupported: bool,
 }
 
 // Debug is written by hand so the token cannot reach a log through a derived
@@ -77,6 +84,8 @@ impl std::fmt::Debug for CcEndpoint {
             .field("tls_ca", &self.tls_ca)
             .field("token", &if self.token.is_empty() { "(unset)" } else { "(redacted)" })
             .field("security", &self.security)
+            .field("max_version", &self.max_version)
+            .field("allow_unsupported", &self.allow_unsupported)
             .finish()
     }
 }
@@ -106,11 +115,15 @@ enum ConnectFailure {
     Transport(anyhow::Error),
     /// The server answered and refused the credentials.
     Auth(tonic::Status),
+    /// The server answered and reported a version outside the supported range.
+    /// Neither retrying nor another transport can change a version number.
+    Unsupported(String),
 }
 
 impl ConnectFailure {
     fn into_report(self, addr: &str, attempted: Transport) -> anyhow::Error {
         match self {
+            ConnectFailure::Unsupported(message) => anyhow!("{message}"),
             ConnectFailure::Auth(status) => anyhow!(
                 "Control-Center rejected the credentials for WatchCommands ({}). \
                  Version 1.1.0 and later require a token with the `monitor` scope — \
@@ -152,10 +165,11 @@ impl WatchStream {
         loop {
             attempt += 1;
             match Self::negotiate(&cc).await {
-                Ok((stream, transport)) => {
+                Ok((stream, transport, server_version)) => {
                     tracing::info!(
                         attempt,
                         transport = transport.as_str(),
+                        server_version = %server_version,
                         "Connected to Control-Center"
                     );
                     tracing::debug!(addr = %cc.addr, "Control-Center address");
@@ -164,12 +178,16 @@ impl WatchStream {
                         silence_timeout,
                         disconnect_reason: None,
                         transport,
+                        server_version,
                     });
                 }
                 Err(e) => {
                     // A refused token is a configuration error, not a transient one.
                     // Retrying ten times cannot fix it and only delays the report.
-                    let fatal = matches!(e, ConnectFailure::Auth(_));
+                    let fatal = matches!(
+                        e,
+                        ConnectFailure::Auth(_) | ConnectFailure::Unsupported(_)
+                    );
                     let report = e.into_report(&cc.addr, Self::first_transport(cc.security));
 
                     if fatal || attempt >= MAX_ATTEMPTS {
@@ -205,14 +223,14 @@ impl WatchStream {
     /// through `CcSecurity::Strict` and `CcSecurity::Legacy`.
     async fn negotiate(
         cc: &CcEndpoint,
-    ) -> Result<(Streaming<CommandEvent>, Transport), ConnectFailure> {
+    ) -> Result<(Streaming<CommandEvent>, Transport, String), ConnectFailure> {
         let plan = transport_plan(cc.security);
 
         let mut last: Option<ConnectFailure> = None;
 
         for (index, transport) in plan.iter().copied().enumerate() {
             match Self::try_connect(cc, transport).await {
-                Ok(stream) => {
+                Ok((stream, server_version)) => {
                     if index > 0 {
                         // Only reachable under Auto, and only after TLS failed at the
                         // transport level. Never let a downgrade pass unannounced.
@@ -224,12 +242,18 @@ impl WatchStream {
                              \"strict\" to refuse the downgrade."
                         );
                     }
-                    return Ok((stream, transport));
+                    return Ok((stream, transport, server_version));
                 }
                 // The server answered and refused the token. Another transport
                 // cannot help, and trying one would be a pointless downgrade.
                 Err(ConnectFailure::Auth(status)) => {
                     return Err(ConnectFailure::Auth(status));
+                }
+                // A version mismatch is a property of the server, not the wire —
+                // another transport would reach the same server and be refused
+                // for the same reason.
+                Err(ConnectFailure::Unsupported(message)) => {
+                    return Err(ConnectFailure::Unsupported(message));
                 }
                 Err(other) => last = Some(other),
             }
@@ -244,7 +268,7 @@ impl WatchStream {
     async fn try_connect(
         cc: &CcEndpoint,
         transport: Transport,
-    ) -> Result<Streaming<CommandEvent>, ConnectFailure> {
+    ) -> Result<(Streaming<CommandEvent>, String), ConnectFailure> {
         let uri = normalize_addr(&cc.addr, transport);
 
         let mut endpoint = Endpoint::from_shared(uri.clone())
@@ -252,13 +276,19 @@ impl WatchStream {
             .map_err(ConnectFailure::Transport)?;
 
         if transport == Transport::Tls {
-            let mut tls = ClientTlsConfig::new().with_enabled_roots();
-            if !cc.tls_ca.is_empty() {
+            // A configured CA is an exclusive pin, not an addition. `ca_certificate`
+            // appends to the trust set and `with_enabled_roots` enables the platform
+            // store alongside it, so enabling both would keep every public CA trusted
+            // for this name while the operator believes only their own CA is. Falling
+            // back to the platform roots is only correct when nothing was pinned.
+            let tls = if cc.tls_ca.is_empty() {
+                ClientTlsConfig::new().with_enabled_roots()
+            } else {
                 let pem = std::fs::read(&cc.tls_ca)
                     .with_context(|| format!("Cannot read control_center_tls_ca: {}", cc.tls_ca))
                     .map_err(ConnectFailure::Transport)?;
-                tls = tls.ca_certificate(Certificate::from_pem(pem));
-            }
+                ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem))
+            };
             endpoint = endpoint
                 .tls_config(tls)
                 .context("Failed to configure TLS for the Control-Center connection")
@@ -284,6 +314,11 @@ impl WatchStream {
         // session records. Withholding it costs nothing against a genuine 1.0.0
         // server, which does not check it.
         let credentials_allowed = transport == Transport::Tls || cc.security == CcSecurity::Legacy;
+
+        // Check the version before subscribing, so an unsupported server is a
+        // startup error rather than a session that opens and then records under
+        // semantics this build does not know.
+        let server_version = Self::check_version(cc, &mut client, credentials_allowed).await?;
 
         let mut request = Request::new(WatchRequest {});
         if !cc.token.is_empty() {
@@ -315,11 +350,82 @@ impl WatchStream {
             }
         })?;
 
-        Ok(response.into_inner())
+        Ok((response.into_inner(), server_version))
+    }
+
+    /// Ask the server what it is, and decide whether this build can record it.
+    ///
+    /// `GetServerIdentity` carries the version and is `monitor`-scoped — the same
+    /// scope WatchCommands needs, so a configuration that can subscribe can also
+    /// ask. A failed or empty answer is not fatal: Control-Center 1.0.0 predates
+    /// this check, and converting a working legacy setup into a hard failure would
+    /// be a regression rather than a safeguard.
+    async fn check_version(
+        cc: &CcEndpoint,
+        client: &mut ControlServiceClient<tonic::transport::Channel>,
+        credentials_allowed: bool,
+    ) -> Result<String, ConnectFailure> {
+        let mut request = Request::new(InfoRequest {});
+        if credentials_allowed && !cc.token.is_empty() {
+            if let Ok(value) = format!("Bearer {}", cc.token).parse() {
+                request.metadata_mut().insert("authorization", value);
+            }
+        }
+
+        let reported = match client.get_server_identity(request).await {
+            Ok(response) => response.into_inner().version,
+            Err(status) => {
+                tracing::warn!(
+                    addr = %cc.addr,
+                    "Could not read the Control-Center version ({status}); proceeding without \
+                     a compatibility check. Expected against Control-Center 1.0.0."
+                );
+                String::new()
+            }
+        };
+
+        let max_override = compat::Version::parse(&cc.max_version);
+        if !cc.max_version.trim().is_empty() && max_override.is_none() {
+            tracing::warn!(
+                configured = %cc.max_version,
+                "control_center_max_version is not a valid x.y.z version — ignoring it and \
+                 using the compiled-in ceiling."
+            );
+        }
+
+        let verdict = compat::evaluate(&reported, max_override);
+
+        if let Some(refusal) = verdict.refusal() {
+            if cc.allow_unsupported {
+                tracing::warn!(
+                    "control_center_allow_unsupported is set — recording anyway. {refusal}"
+                );
+            } else {
+                return Err(ConnectFailure::Unsupported(refusal));
+            }
+        }
+
+        match &verdict {
+            Compat::Supported(v) => {
+                tracing::info!(server_version = %v, "Control-Center version supported")
+            }
+            Compat::Unknown(_) => tracing::warn!(
+                "Control-Center did not report a version — recording without a compatibility \
+                 check."
+            ),
+            _ => {}
+        }
+
+        Ok(verdict.recorded())
     }
 
     pub fn transport(&self) -> Transport {
         self.transport
+    }
+
+    /// Version Control-Center reported at connect. Empty when it did not say.
+    pub fn server_version(&self) -> &str {
+        &self.server_version
     }
 
     pub async fn next_event(&mut self) -> Option<CommandEvent> {
@@ -437,6 +543,8 @@ mod tests {
             tls_ca: String::new(),
             token: "super-secret-jwt".to_string(),
             security,
+            max_version: String::new(),
+            allow_unsupported: false,
         }
     }
 

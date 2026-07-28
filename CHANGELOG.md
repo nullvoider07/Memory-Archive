@@ -3,6 +3,113 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-07-28
+
+Control-Center 1.2.1 support, and a version gate.
+
+Control-Center 1.2.1 changes no part of the contract Memory Archive consumes: the
+`.proto` is untouched, `crates/server/` is not in the 1.2.0..1.2.1 diff, and the
+typed-text redaction added in that release is confined to the controller's console
+output and its local metrics history — `human_command` on the wire still carries the
+full text, so recorded steps are unaffected. No compatibility change was required;
+the work below is verification and the parity items 1.2.1 raised.
+
+### Security
+
+- **`cargo audit`: 0 vulnerabilities.** The 13 warnings deferred at 0.2.0 were
+  triaged by reachability rather than carried forward. `imageproc` 0.25.0 → 0.25.1
+  clears three unsoundness advisories (RUSTSEC-2026-0115/0116/0117); none were
+  reachable — they affect `binary_descriptors::brief` and
+  `geometric_transformations::warp_into{,_with}`, while `vision/marker.rs` uses
+  only `drawing::*` and `rect::Rect` — but the patch release is free. Of the ten
+  that remain, `anyhow`'s `Error::downcast_mut` unsoundness (RUSTSEC-2026-0190) is
+  unreachable: the workspace never calls `downcast*`. `rand`'s unsoundness
+  (RUSTSEC-2026-0097) requires a custom `log` logger that calls `rand::rng()`;
+  there is none. The rest are unmaintained or yanked transitive crates
+  (`core2`, `paste`, `rustls-pemfile`, `ttf-parser`, `spin`) with no advisory
+  against them.
+
+- **A pinned Control-Center CA now excludes the platform trust store.** With
+  `control_center_tls_ca` set, `try_connect` built its TLS configuration as
+  `ClientTlsConfig::new().with_enabled_roots()` and then *added* the configured CA.
+  Both inputs are additive — `with_enabled_roots` sets `with_native_roots` and
+  `ca_certificate` appends to the trust set — so every publicly trusted CA remained
+  acceptable for the Control-Center name while the operator believed the connection
+  was pinned to their own. The platform roots are now enabled only when no CA is
+  configured. This is the counterpart to the downgrade Control-Center closed in
+  1.2.1; the related failure mode there (an unreadable CA silently falling back to
+  the system store) never applied here — that path has always been a hard error.
+
+- **Staged Control-Center archives are verified before extraction.**
+  `integration-tests/stage-cc-releases.sh` downloaded a release archive and handed
+  it straight to `tar`. Control-Center publishes a `SHA256SUMS` covering every
+  archive from 1.2.1 onward; the script now checks the download against it and
+  refuses to extract on a mismatch. Releases before 1.2.1 predate checksum
+  publishing and are reported as extracted unverified rather than failing. Proven
+  in both directions: the pristine archive verifies, a single appended byte is
+  rejected, and an empty checksum list fails closed rather than passing vacuously.
+
+### Added
+
+- **A Control-Center version gate.** `WatchStream` now reads `GetServerIdentity`
+  before subscribing and refuses to record against a version outside the range
+  this build has been verified against. The session is marked `incomplete` and
+  `memory-archive start` exits non-zero, rather than the historical failure of a
+  session that registers, reports `active` and records nothing.
+
+  The gate refuses rather than adapts, deliberately. Protobuf already absorbs
+  additive wire changes — an unknown field is ignored — so a new field needs no
+  code. What cannot be absorbed is a change of *meaning* in an existing field:
+  `position_captured` was a best-effort readback before 1.2.0 and a verified
+  value from 1.2.0, identical on the wire. Nothing observable at runtime
+  separates them, so nothing at runtime can adapt; the knowledge lives in a
+  changelog a person read. Guessing would trade a loud failure for a silent one,
+  and the artefact of guessing wrong is a corpus session that records
+  confidently and wrongly, discovered long after the environment is gone.
+
+  Two escapes, both explicit: `control_center_max_version` raises the ceiling
+  without a rebuild, for a release whose notes confirm the command stream is
+  unchanged — it only ever raises, so it cannot narrow the supported range;
+  `control_center_allow_unsupported` bypasses the gate entirely and logs the
+  refusal as a warning on every connect. A server that reports no version, or one
+  that cannot be parsed, is **not** refused — Control-Center 1.0.0 predates this
+  check and turning a working legacy setup into a hard failure would be a
+  regression, not a safeguard.
+
+  Verified end-to-end against real binaries by temporarily lowering the ceiling
+  to 1.1.0 and pointing ma-core at a 1.2.1 server: unset → exit 1, no
+  subscription, session `incomplete`; `control_center_max_version = "1.2.1"` →
+  subscribes cleanly; `control_center_allow_unsupported = true` → subscribes and
+  still logs the refusal.
+
+- **`actuation_server_version` in session metadata**, alongside the existing
+  `actuation_agent_version`. The two halves of Control-Center install
+  independently and 1.2.1 warns that a mismatched pair fails actuation closed
+  while still reporting success, so a mismatch is now logged once when the first
+  command event arrives.
+
+### Changed
+
+- **The compatibility matrix is discovered, not written down.**
+  `stage-cc-releases.sh` enumerates published releases from the GitHub API and
+  the tests parameterise over whatever is staged, so a new Control-Center release
+  joins the matrix by being staged rather than by editing a list. A hard-coded
+  array silently stops covering the newest release, which is precisely the case
+  these tests exist to catch. Explicit arguments still override, for bisecting.
+  12 integration tests (was 9) across real 1.0.0, 1.1.0, 1.2.0 and 1.2.1 servers.
+
+- **`release.yml` refuses a tag that disagrees with the source.** Nothing compared
+  them, so a tag pushed before the version bump would publish archives labelled
+  with one version containing binaries reporting another. The new `verify-version`
+  job gates the whole matrix on the tag matching `Cargo.toml`,
+  `ma-app/pyproject.toml`, `ma_app/__init__.py` and the `ma-core` pin in
+  `Cargo.lock` — the last because a stale lockfile breaks every `--locked` build,
+  and it went stale during this release.
+
+- `control_center_max_version` and `control_center_allow_unsupported` are exposed
+  through `memory-archive config` and `config --show`, matching the other
+  Control-Center settings.
+
 ## [0.2.0] — 2026-07-27
 
 Control-Center 1.1.0+ compatibility, and the silent capture failure it exposed.

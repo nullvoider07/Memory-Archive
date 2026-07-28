@@ -6,13 +6,14 @@ still gets a clean unit-test run.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from harness import cc_server_binary, ma_core_binary, reset_registry
+from harness import CC_BIN_DIR, cc_server_binary, ma_core_binary, reset_registry
 
 
 def _redis_available() -> bool:
@@ -55,3 +56,32 @@ def require_cc(version: str) -> Path:
     if binary is None:
         pytest.skip(f"Control-Center {version} not staged — see integration-tests/README.md")
     return binary
+
+
+def _as_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def staged_versions(minimum: str | None = None) -> list[str]:
+    """Control-Center versions present in the staging directory, oldest first.
+
+    The matrix is derived from what is staged rather than written down, so a new
+    Control-Center release is covered by re-running stage-cc-releases.sh — no test
+    edit. A hard-coded list silently stops covering the newest release, which is
+    the case these tests exist to catch.
+
+    Returns a single placeholder when nothing is staged so collection still yields
+    a test, which then skips through `require_cc` with an actionable message.
+    """
+    if not CC_BIN_DIR.is_dir():
+        return [minimum or "0.0.0"]
+
+    found = sorted(
+        (d.name for d in CC_BIN_DIR.iterdir()
+         if d.is_dir() and (d / "control-center-server").is_file()
+         and re.fullmatch(r"\d+\.\d+\.\d+", d.name)),
+        key=_as_tuple,
+    )
+    if minimum:
+        found = [v for v in found if _as_tuple(v) >= _as_tuple(minimum)]
+    return found or [minimum or "0.0.0"]

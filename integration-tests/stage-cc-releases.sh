@@ -6,13 +6,28 @@
 # skipped rather than fatal — the tests skip the matching parameterisation.
 set -uo pipefail
 
-VERSIONS=("${@:-}")
-if [[ -z "${VERSIONS[0]:-}" ]]; then
-    VERSIONS=(1.0.0 1.1.0 1.2.0)
-fi
-
 DEST="${MA_TEST_CC_BIN_DIR:-/tmp/ma-test-cc}"
 REPO="${MA_TEST_CC_REPO:-nullvoider07/control-center}"
+
+# Versions come from the release list, not a hard-coded array: a matrix that has
+# to be edited for every Control-Center release is a matrix that silently stops
+# covering the newest one. Explicit arguments still override, for bisecting.
+VERSIONS=("$@")
+if [[ ${#VERSIONS[@]} -eq 0 ]]; then
+    mapfile -t VERSIONS < <(
+        gh release list --repo "${REPO}" --limit 100 \
+            --json tagName,isDraft,isPrerelease \
+            --jq '.[] | select(.isDraft == false and .isPrerelease == false) | .tagName' \
+        | sed 's/^v//' \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+        | sort -t. -k1,1n -k2,2n -k3,3n
+    )
+    if [[ ${#VERSIONS[@]} -eq 0 ]]; then
+        echo "[FAIL] could not enumerate releases from ${REPO}" >&2
+        exit 1
+    fi
+    echo "Discovered ${#VERSIONS[@]} release(s): ${VERSIONS[*]}"
+fi
 
 mkdir -p "${DEST}"
 
@@ -31,6 +46,21 @@ for version in "${VERSIONS[@]}"; do
         echo "[warn] could not download ${archive} — ${version} will be skipped"
         rm -rf "${tmp}"
         continue
+    fi
+
+    # Verify before extracting. Control-Center publishes a SHA256SUMS covering
+    # every archive from 1.2.1 onward; earlier releases predate it. Where the
+    # file exists a mismatch is fatal, so a tampered archive never reaches tar.
+    if gh release download "v${version}" --repo "${REPO}" \
+            --pattern "SHA256SUMS" --dir "${tmp}" 2>/dev/null; then
+        if ! (cd "${tmp}" && grep -F " ${archive}" SHA256SUMS | sha256sum -c --status -); then
+            echo "[FAIL] checksum mismatch for ${archive} — refusing to extract"
+            rm -rf "${tmp}"
+            exit 1
+        fi
+        echo "[ok] checksum verified for ${version}"
+    else
+        echo "[warn] ${version} publishes no SHA256SUMS (pre-1.2.1) — extracting unverified"
     fi
 
     mkdir -p "${DEST}/${version}"

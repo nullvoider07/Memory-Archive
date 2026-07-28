@@ -1,5 +1,6 @@
 // /Memory-Archive/ma-core/src/capture/mod.rs
 
+pub mod compat;
 pub mod disconnect;
 pub mod session_state;
 pub mod stream;
@@ -300,6 +301,8 @@ pub async fn run_watch_loop(
             tls_ca: config.control_center_tls_ca.clone(),
             token: config.control_center_token.clone(),
             security: config.control_center_security,
+            max_version: config.control_center_max_version.clone(),
+            allow_unsupported: config.control_center_allow_unsupported,
         };
         match WatchStream::connect(cc, silence_timeout).await {
             Ok(s) => {
@@ -310,6 +313,7 @@ pub async fn run_watch_loop(
                     "Watch loop: using direct gRPC event source"
                 );
                 state.set_actuation_transport(s.transport().as_str());
+                state.set_actuation_server_version(s.server_version());
                 EventSource::Grpc(s)
             }
             Err(e) => {

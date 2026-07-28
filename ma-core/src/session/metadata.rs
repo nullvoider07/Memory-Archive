@@ -47,6 +47,16 @@ pub struct SessionMetadata {
     #[serde(default)]
     pub actuation_transport: String,
 
+    /// Control-Center *server* version, read from `GetServerIdentity` at connect.
+    ///
+    /// Separate from `actuation_agent_version` on purpose: the two halves are
+    /// installed independently and Control-Center 1.2.1 warns that a mismatched
+    /// pair fails drags closed. Recording both makes that visible in the session
+    /// rather than only in whatever shell did the install. Empty when the server
+    /// did not report one.
+    #[serde(default)]
+    pub actuation_server_version: String,
+
     // Timestamps
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,

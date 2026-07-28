@@ -36,6 +36,26 @@ pub struct Config {
     #[serde(default = "defaults::control_center_security")]
     pub control_center_security: CcSecurity,
 
+    /// Highest Control-Center version to accept, overriding the compiled-in
+    /// ceiling in `capture::compat`. Empty uses the compiled value.
+    ///
+    /// This exists so a Control-Center release whose notes confirm the command
+    /// stream is unchanged can be blessed without waiting for a Memory Archive
+    /// build. It only ever raises the ceiling — setting it lower cannot make the
+    /// gate reject a version this build genuinely supports.
+    #[serde(default)]
+    pub control_center_max_version: String,
+
+    /// Record against a Control-Center version outside the supported range.
+    ///
+    /// The gate refuses by default because an unrecognised version can change a
+    /// field's meaning without changing the wire, and the result is a session
+    /// that records confidently and wrongly. Set this only to get a recording out
+    /// of an environment you cannot upgrade, and treat what it produces as
+    /// unverified.
+    #[serde(default)]
+    pub control_center_allow_unsupported: bool,
+
     #[serde(default)]
     pub the_eyes_addr: String,
 
@@ -109,6 +129,8 @@ impl Default for Config {
             control_center_tls_ca: String::new(),
             control_center_token: String::new(),
             control_center_security: defaults::control_center_security(),
+            control_center_max_version: String::new(),
+            control_center_allow_unsupported: false,
             the_eyes_addr: String::new(),
             the_eyes_poll_interval_seconds: defaults::the_eyes_poll_interval_seconds(),
             silence_timeout_seconds: defaults::silence_timeout_seconds(),

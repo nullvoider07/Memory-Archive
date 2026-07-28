@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import require_cc
+from conftest import require_cc, staged_versions
 from harness import (
     cc_server,
     cli,
@@ -29,6 +29,13 @@ from harness import (
 )
 
 pytestmark = pytest.mark.integration
+
+# Every staged release that mandates TLS and a monitor scope (1.1.0+).
+# Derived at collection time so a new Control-Center release joins the
+# matrix by being staged, not by editing this file.
+HARDENED = staged_versions(minimum="1.1.0")
+# The newest staged release — what an operator would actually be running.
+LATEST = HARDENED[-1]
 
 
 def _log(ma) -> str:
@@ -44,7 +51,7 @@ def _start(ma, session_id: str):
 # 1.1.0+ — TLS and a monitor-scoped token
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("version", ["1.1.0", "1.2.0"])
+@pytest.mark.parametrize("version", HARDENED)
 def test_hardened_server_connects_over_tls(version, workdir: Path, clean_registry):
     """A configured token plus a trusted CA reaches a TLS-only server."""
     binary = require_cc(version)
@@ -66,7 +73,7 @@ def test_hardened_server_connects_over_tls(version, workdir: Path, clean_registr
             assert "Withholding the Control-Center token" not in log
 
 
-@pytest.mark.parametrize("version", ["1.1.0", "1.2.0"])
+@pytest.mark.parametrize("version", HARDENED)
 def test_missing_token_fails_loudly_and_does_not_strand_the_session(
     version, workdir: Path, clean_registry
 ):
@@ -92,7 +99,7 @@ def test_missing_token_fails_loudly_and_does_not_strand_the_session(
 
 def test_untrusted_ca_is_reported_and_never_downgraded(workdir: Path, clean_registry):
     """A certificate we cannot verify must not become a plaintext connection."""
-    binary = require_cc("1.2.0")
+    binary = require_cc(LATEST)
     server_tls = write_tls_material(workdir / "tls-server")
     # A second, unrelated CA — valid PEM, wrong issuer.
     wrong_ca, _c, _k = write_tls_material(workdir / "tls-other")
@@ -178,7 +185,7 @@ def test_http_address_still_reaches_a_tls_server(workdir: Path, clean_registry):
     This is why the URL scheme does not pin the transport under `auto`: every
     deployment predating Control-Center 1.1.0 has `http://` written down.
     """
-    binary = require_cc("1.2.0")
+    binary = require_cc(LATEST)
     tls = write_tls_material(workdir / "tls")
     ca, _cert, _key = tls
 
@@ -192,3 +199,29 @@ def test_http_address_still_reaches_a_tls_server(workdir: Path, clean_registry):
             _start(ma, session)
 
             assert 'transport="tls"' in _log(ma)
+
+
+# ---------------------------------------------------------------------------
+# Version gate
+# ---------------------------------------------------------------------------
+
+def test_supported_version_is_recorded_as_provenance(workdir: Path, clean_registry):
+    """The server version must reach the session, not just the log.
+
+    `position_captured` changed meaning between Control-Center releases without
+    changing on the wire, so a recorded session is only interpretable if it says
+    which server produced it.
+    """
+    binary = require_cc(LATEST)
+    tls = write_tls_material(workdir / "tls")
+    ca, _cert, _key = tls
+
+    with cc_server(binary, workdir, tls) as cc:
+        with ma_core(
+            workdir, cc.port,
+            token=mint_token("monitor"), tls_ca=str(ca), security="auto",
+        ) as ma:
+            session = register_session(ma.config_path, "compat-provenance")
+            _start(ma, session)
+
+            assert f"server_version={LATEST}" in _log(ma), _log(ma)[-1500:]

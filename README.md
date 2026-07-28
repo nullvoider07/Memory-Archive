@@ -6,11 +6,18 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.2.0  
+**Version:** 0.3.0  
 **Last Updated:** July 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.2.0** — Control-Center 1.1.0+ compatibility, and a silent capture failure closed:
+> **✨ What's new in 0.3.0** — Control-Center 1.2.1 support, and a version gate so an unverified Control-Center can never record silently:
+> - **Memory Archive now refuses to record against a Control-Center version it has not been verified against.** The capture stream reads `GetServerIdentity` before subscribing; an unsupported version marks the session `incomplete` and exits non-zero instead of recording under semantics this build does not know. It refuses rather than adapts on purpose: protobuf already absorbs *additive* wire changes, but a field can change **meaning** with no change on the wire — `position_captured` did exactly that in 1.2.0 — and nothing observable at runtime can distinguish the two. Guessing would turn a loud failure into a silent one, and the artefact is a session that records confidently and wrongly. Two explicit escapes: `control_center_max_version` raises the ceiling without a rebuild (it only ever raises), and `control_center_allow_unsupported` bypasses the gate while logging the refusal on every connect. A server that reports no version is **not** refused — Control-Center 1.0.0 predates the check.
+> - **A pinned Control-Center CA now excludes the platform trust store.** With `control_center_tls_ca` set, the TLS config previously enabled the system roots *and* added the configured CA — both inputs are additive — so every publicly trusted CA stayed acceptable for the Control-Center name while the connection looked pinned. Platform roots are now used only when no CA is configured.
+> - **Sessions record the Control-Center *server* version** (`actuation_server_version`) alongside the agent version, and a mismatch is logged. The two halves install independently, and Control-Center 1.2.1 warns that a split pair fails actuation closed while still reporting success.
+> - **Staged Control-Center archives are checksum-verified before extraction**, against the `SHA256SUMS` Control-Center publishes from 1.2.1 onward. Verification fails closed; releases predating it are reported as unverified rather than blocked.
+> - **The compatibility matrix is discovered, not written down** — releases are enumerated from the GitHub API and the tests parameterise over whatever is staged, so a new Control-Center release joins the matrix without a code edit. 12 integration tests across real 1.0.0, 1.1.0, 1.2.0 and 1.2.1 servers.
+>
+> Earlier in 0.2.0 — Control-Center 1.1.0+ compatibility, and a silent capture failure closed:
 > - **Capture works against every Control-Center release (1.0.0, 1.1.0, 1.2.0) from one configuration.** Control-Center 1.1.0 made TLS mandatory and put a `monitor` scope on `WatchCommands`; Memory Archive connected in plaintext with no credentials, so **every session against 1.1.0+ recorded zero steps**. The capture stream now presents a bearer token and negotiates the transport — TLS first, falling back to plaintext only when the transport itself fails, and never silently. Set `control_center_token` (and `control_center_tls_ca` for a private CA); see [Control-Center compatibility](#control-center-compatibility).
 > - **A watch that cannot subscribe now fails loudly instead of looking healthy.** `memory-archive start` previously returned success the moment the loop was spawned, before the gRPC subscription was attempted. A failure left the session sitting at `active`, recording nothing, with the error visible nowhere — the operator only found out by noticing an empty trace. `start` now waits for the event source to come up, exits non-zero with the cause, and marks the session `incomplete` rather than stranding it `active`.
 > - **Frames are no longer marked at a position the pointer never occupied.** `mouse_x`/`mouse_y` are non-optional, so an uncaptured position arrives as `(0, 0)` — a real coordinate, the top-left corner. Control-Center 1.2.0 reports `position_captured=false` whenever it cannot verify the readback, which makes that common rather than rare. The click marker is now drawn only when the position was verified; the frame is still captured either way.
@@ -1372,6 +1379,8 @@ When `memory-archive annotator claim` is used (remote mode), the TUI starts a da
 | `control_center_token` | `--control-center-token` | JWT presented to CC; the `monitor` scope is **required by CC 1.1.0+** and ignored by 1.0.0 | both | — |
 | `control_center_tls_ca` | `--control-center-tls-ca` | PEM CA that signed the CC server certificate; empty uses the system trust store | both | — |
 | `control_center_security` | `--control-center-security` | Transport policy: `auto` (TLS, fall back to plaintext with a warning) / `strict` (TLS only) / `legacy` (plaintext only) | both | `auto` |
+| `control_center_max_version` | `--control-center-max-version` | Accept CC up to this `x.y.z`, above the built-in ceiling. **Only ever raises** — it cannot narrow the supported range | both | — |
+| `control_center_allow_unsupported` | `--control-center-allow-unsupported` | Record against a CC version outside the supported range. Output is unverified; the refusal is logged on every connect | both | `false` |
 | `the_eyes_addr` | `--the-eyes-addr` | The-Eyes HTTP global fallback address | both | — |
 | `the_eyes_poll_interval_seconds` | `--the-eyes-poll-interval` | The-Eyes liveness poll interval (seconds) | both | `10` |
 | `silence_timeout_seconds` | `--silence-timeout` | CC silence before graceful disconnect (seconds) | both | `30` |
@@ -1408,14 +1417,16 @@ When `memory-archive annotator claim` is used (remote mode), the TUI starts a da
 
 ### Control-Center Compatibility
 
-Memory Archive supports **Control-Center 1.0.0, 1.1.0 and 1.2.0** from a single configuration. Two regimes exist, and the boundary is 1.1.0:
+Memory Archive supports **Control-Center 1.0.0 through 1.2.1** from a single configuration. Two regimes exist, and the boundary is 1.1.0:
 
-| | 1.0.0 | 1.1.0 | 1.2.0 |
-|---|---|---|---|
-| TLS on the gRPC listener | not supported | **required** | **required** |
-| `monitor` scope on `WatchCommands` | not enforced | **required** | **required** |
-| `CommandEvent` wire format | identical | identical | identical |
-| `position_captured` meaning | best-effort readback | best-effort readback | **verified, or `false`** |
+| | 1.0.0 | 1.1.0 | 1.2.0 | 1.2.1 |
+|---|---|---|---|---|
+| TLS on the gRPC listener | not supported | **required** | **required** | **required** |
+| `monitor` scope on `WatchCommands` | not enforced | **required** | **required** | **required** |
+| `CommandEvent` wire format | identical | identical | identical | identical |
+| `position_captured` meaning | best-effort readback | best-effort readback | **verified, or `false`** | **verified, or `false`** |
+
+Every row above is verified against real release binaries by the compatibility suite in `integration-tests/`, which discovers releases from the GitHub API rather than a written-down list.
 
 **Configure once, works everywhere:**
 
@@ -1429,7 +1440,7 @@ memory-archive config --control-center-token "$(CC_JWT_SECRET=<cc-jwt-secret> \
 memory-archive config --control-center-tls-ca ~/.config/control-center/tls/ca.crt
 ```
 
-**Transport negotiation.** The version cannot be discovered before connecting — `Ping` carries no version and `GetServerIdentity` is itself scope-gated — so the transport is negotiated rather than derived from a version number. Under the default `auto` policy the stream attempts TLS first and falls back to plaintext **only** when the transport itself fails, logging a warning that names the downgrade. A rejected token never triggers a fallback: the server answered, so a weaker transport would not help.
+**Transport negotiation.** The version cannot be discovered *before* connecting — `Ping` carries no version and `GetServerIdentity` is itself `monitor`-scoped — so the transport is negotiated rather than derived from a version number. (Once the channel is up and the token has been accepted, the version *is* readable, which is what the version gate below uses.) Under the default `auto` policy the stream attempts TLS first and falls back to plaintext **only** when the transport itself fails, logging a warning that names the downgrade. A rejected token never triggers a fallback: the server answered, so a weaker transport would not help.
 
 The URL scheme in `control_center_addr` does **not** pin the transport under `auto` — an address written `http://` is still tried over TLS first, so pointing an existing configuration at an upgraded server needs no edit. Use `strict` to refuse any downgrade, or `legacy` to force plaintext.
 
@@ -1449,7 +1460,22 @@ The URL scheme in `control_center_addr` does **not** pin the transport under `au
 | `the server refused a plaintext connection` | CC 1.1.0+ reached without TLS | Use `auto` or `strict`; check the address |
 | `the server certificate was not trusted` | Private CA not configured | Point `control_center_tls_ca` at `ca.crt` |
 
-**Interpreting older sessions.** `position_captured` changed meaning in 1.2.0: before it, the agent reported whatever the cursor readback returned; from 1.2.0 it reports `false` rather than publishing a coordinate it could not verify. Because `mouse_x`/`mouse_y` are non-optional, an uncaptured position is carried as `(0, 0)` — a real screen coordinate. Always read `position_captured` before the coordinates. Sessions recorded by 0.2.0 onward store `actuation_agent_version` and `actuation_transport` in `metadata.json` so the regime is recoverable; sessions recorded earlier leave both empty.
+**The version gate.** Before subscribing, the capture stream reads `GetServerIdentity` and compares the reported version against the range this build was verified against. A version above that range is refused: the session is marked `incomplete` and `memory-archive start` exits non-zero, rather than recording under semantics this build does not know.
+
+It refuses rather than adapts, deliberately. Protobuf already absorbs *additive* wire changes — an unknown field is ignored, so a new field in `CommandEvent` needs no code. What cannot be absorbed is a change of **meaning** in a field that already exists: `position_captured` was a best-effort readback before 1.2.0 and a verified value from 1.2.0, byte-identical on the wire. Nothing observable at runtime separates the two, so nothing at runtime can adapt to it — the knowledge lives in a changelog a person read. Adapting by guess would trade a loud failure for a silent one, and the artefact of guessing wrong is a corpus session that records confidently and wrongly, discovered long after the environment that produced it is gone.
+
+| Situation | Behaviour |
+|---|---|
+| Version inside the supported range | Records; version stored as `actuation_server_version` |
+| Version above the range | **Refused.** Message names the highest supported version |
+| Version below the range | **Refused.** Upgrade Control-Center |
+| No version reported, or unparseable | **Allowed**, with a warning — Control-Center 1.0.0 predates this check |
+
+Two explicit escapes. `control_center_max_version = "1.2.2"` raises the ceiling without waiting for a Memory Archive build — use it once the release notes confirm the command stream is unchanged. It only ever *raises*: setting it lower cannot make the gate reject a version this build genuinely supports. `control_center_allow_unsupported = true` bypasses the gate entirely and logs the refusal as a warning on every connect; treat anything it records as unverified.
+
+**Upgrade both halves.** The Control-Center controller and agent install independently, and 1.2.1 warns that a mismatched pair fails actuation closed while still reporting success. Sessions now record `actuation_server_version` and `actuation_agent_version` separately, and a mismatch is logged once when the first command event arrives.
+
+**Interpreting older sessions.** `position_captured` changed meaning in 1.2.0: before it, the agent reported whatever the cursor readback returned; from 1.2.0 it reports `false` rather than publishing a coordinate it could not verify. Because `mouse_x`/`mouse_y` are non-optional, an uncaptured position is carried as `(0, 0)` — a real screen coordinate. Always read `position_captured` before the coordinates. Sessions recorded by 0.2.0 onward store `actuation_agent_version` and `actuation_transport` in `metadata.json` so the regime is recoverable; 0.3.0 adds `actuation_server_version`. Sessions recorded earlier leave these empty.
 
 ### Environment Variables
 

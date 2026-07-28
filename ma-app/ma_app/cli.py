@@ -1,6 +1,7 @@
 # /Memory-Archive/ma-app/ma_app/cli.py
 
 import os
+import re
 from typing import Optional
 import typer
 from pathlib import Path
@@ -9,7 +10,7 @@ from rich.console import Console
 try:
     from ma_app import __version__
 except ImportError:
-    __version__ = "0.2.0"
+    __version__ = "0.3.0"
 
 app = typer.Typer(
     name="memory-archive",
@@ -862,6 +863,8 @@ def config(
     control_center_token: str = typer.Option(None, "--control-center-token", help="JWT for Control-Center; needs the 'monitor' scope on 1.1.0+"),
     control_center_tls_ca: str = typer.Option(None, "--control-center-tls-ca", help="PEM CA that signed the Control-Center certificate (from 'control-center gen-certs')"),
     control_center_security: str = typer.Option(None, "--control-center-security", help="Transport policy: auto | strict | legacy (default: auto)"),
+    control_center_max_version: str = typer.Option(None, "--control-center-max-version", help="Accept Control-Center up to this x.y.z, above the built-in ceiling"),
+    control_center_allow_unsupported: bool = typer.Option(None, "--control-center-allow-unsupported/--no-control-center-allow-unsupported", help="Record against an unsupported Control-Center version (unverified output)"),
     the_eyes_addr: str = typer.Option(None, "--the-eyes-addr", help="The-Eyes HTTP server address e.g. http://127.0.0.1:8080"),
     the_eyes_poll_interval: int = typer.Option(None, "--the-eyes-poll-interval", help="The-Eyes liveness poll interval in seconds (default: 10)"),
     cloud: str = typer.Option(None, "--cloud", help="Cloud provider: aws | azure | gcp"),
@@ -936,6 +939,19 @@ def config(
             )
             raise typer.Exit(code=1)
         settings.control_center_security = choice
+        changed = True
+    if control_center_max_version:
+        candidate = control_center_max_version.strip().lstrip("v")
+        if not re.fullmatch(r"\d+\.\d+\.\d+", candidate):
+            console.print(
+                f"[red]Invalid --control-center-max-version: {control_center_max_version}[/red]\n"
+                "  Expected a version like 1.2.1"
+            )
+            raise typer.Exit(code=1)
+        settings.control_center_max_version = candidate
+        changed = True
+    if control_center_allow_unsupported is not None:
+        settings.control_center_allow_unsupported = control_center_allow_unsupported
         changed = True
     if the_eyes_addr:
         settings.the_eyes_addr = the_eyes_addr

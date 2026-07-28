@@ -199,12 +199,33 @@ impl CaptureState {
         self.metadata.actuation_transport = transport.to_string();
     }
 
+    /// Record the Control-Center server version read at connect.
+    pub fn set_actuation_server_version(&mut self, version: &str) {
+        self.metadata.actuation_server_version = version.to_string();
+    }
+
     /// Record the Control-Center agent version, taken from the first event that
     /// carries one. Later events repeat the same value, so only the first write
     /// does any work.
+    ///
+    /// The first event is also the first moment the agent version is knowable, so
+    /// it is where the server/agent pair can first be compared. Control-Center
+    /// 1.2.1 states the controller and agent must be upgraded together — a split
+    /// pair rejects `dm:` and fails every drag closed while still reporting
+    /// success — so a mismatch is worth saying out loud once.
     pub fn record_agent_version(&mut self, version: &str) {
         if self.metadata.actuation_agent_version.is_empty() && !version.is_empty() {
             self.metadata.actuation_agent_version = version.to_string();
+
+            let server = &self.metadata.actuation_server_version;
+            if !server.is_empty() && server != version {
+                tracing::warn!(
+                    server_version = %server,
+                    agent_version = %version,
+                    "Control-Center server and agent are different versions. Upgrade both \
+                     halves — a split pair can fail actuation while still reporting success."
+                );
+            }
         }
     }
 

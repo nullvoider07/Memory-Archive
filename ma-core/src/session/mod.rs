@@ -147,6 +147,7 @@ fn build_initial_metadata(record: &SessionRecord) -> SessionMetadata {
         // the transport when the stream is negotiated, the agent version from the
         // first command event.
         actuation_agent_version: String::new(),
+        actuation_server_version: String::new(),
         actuation_transport: String::new(),
         created_at: Utc::now(),
         completed_at: None,

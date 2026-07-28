@@ -96,6 +96,14 @@ class Settings:
     control_center_token: str = ""
     control_center_tls_ca: str = ""
     control_center_security: str = "auto"
+    # Raises the supported Control-Center ceiling without a rebuild, for a
+    # release whose notes confirm the command stream is unchanged. Only ever
+    # raises: it cannot narrow the range ma-core was built to support.
+    control_center_max_version: str = ""
+    # Record against a Control-Center version outside the supported range. The
+    # gate refuses by default because an unrecognised version can change a
+    # field's meaning without changing the wire.
+    control_center_allow_unsupported: bool = False
     the_eyes_addr: str = ""
     the_eyes_poll_interval_seconds: int = 10
     silence_timeout_seconds: int = 30
@@ -279,6 +287,10 @@ class Settings:
             control_center_token=data.get("control_center_token", ""),
             control_center_tls_ca=data.get("control_center_tls_ca", ""),
             control_center_security=data.get("control_center_security", "auto"),
+            control_center_max_version=data.get("control_center_max_version", ""),
+            control_center_allow_unsupported=bool(
+                data.get("control_center_allow_unsupported", False)
+            ),
             the_eyes_addr=data.get("the_eyes_addr", ""),
             the_eyes_poll_interval_seconds=int(data.get("the_eyes_poll_interval_seconds", 10)),
             silence_timeout_seconds=data.get("silence_timeout_seconds", 30),
@@ -312,6 +324,8 @@ class Settings:
             f"  control_center_token     : {'(set)' if self.control_center_token else '(not set — required by Control-Center 1.1.0+)'}",
             f"  control_center_tls_ca    : {self.control_center_tls_ca or '(system roots)'}",
             f"  control_center_security  : {self.control_center_security}",
+            f"  control_center_max_version        : {self.control_center_max_version or '(built-in ceiling)'}",
+            f"  control_center_allow_unsupported  : {self.control_center_allow_unsupported}",
             f"  the_eyes_addr            : {self.the_eyes_addr or '(not set)'}",
             f"  the_eyes_poll_interval_s  : {self.the_eyes_poll_interval_seconds}",
             f"  silence_timeout_seconds  : {self.silence_timeout_seconds}",

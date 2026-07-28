@@ -253,6 +253,8 @@ def ma_core(
     tls_ca: str = "",
     security: str = "auto",
     scheme: str = "http",
+    max_version: str = "",
+    allow_unsupported: bool = False,
 ) -> Generator[MaCore]:
     """Run ma-core against an isolated config, storage tree and Redis DB."""
     binary = ma_core_binary()
@@ -281,6 +283,8 @@ def ma_core(
         "control_center_token": token,
         "control_center_tls_ca": tls_ca,
         "control_center_security": security,
+        "control_center_max_version": max_version,
+        "control_center_allow_unsupported": allow_unsupported,
         "the_eyes_addr": "",
         "silence_timeout_seconds": 5,
     }, indent=2))

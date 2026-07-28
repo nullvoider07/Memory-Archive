@@ -36,8 +36,51 @@ env:
 # JOB 1 — Build the Python wheel (once, reused in all platforms)
 # =============================================================================
 jobs:
+  # ---------------------------------------------------------------------------
+  # JOB 0 — Refuse to build a release whose tag disagrees with the source.
+  #
+  # Nothing previously compared them, so a tag pushed before (or without) the
+  # version bump would publish archives labelled with one version containing
+  # binaries reporting another. Cargo.lock is checked too: `cargo build --locked`
+  # fails when the workspace version was bumped without regenerating it, and that
+  # failure would otherwise surface halfway through a five-platform matrix.
+  # ---------------------------------------------------------------------------
+  verify-version:
+    name: Tag matches source version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare tag against Cargo.toml, pyproject.toml and Cargo.lock
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          wheel_version=$(grep -m1 '^version = ' ma-app/pyproject.toml | cut -d'"' -f2)
+          app_version=$(grep -m1 '^__version__ = ' ma-app/ma_app/__init__.py | cut -d'"' -f2)
+
+          echo "tag=${tag} cargo=${cargo_version} wheel=${wheel_version} app=${app_version}"
+
+          fail=0
+          for name in cargo wheel app; do
+              eval "value=\${${name}_version}"
+              if [[ "${value}" != "${tag}" ]]; then
+                  echo "::error::${name} version ${value} does not match tag ${tag}"
+                  fail=1
+              fi
+          done
+
+          # A stale lockfile breaks every --locked build in the matrix below.
+          if ! grep -A1 'name = "ma-core"' Cargo.lock | grep -q "version = \"${tag}\""; then
+              echo "::error::Cargo.lock does not pin ma-core at ${tag} — run 'cargo update --workspace'"
+              fail=1
+          fi
+
+          exit "${fail}"
+
   build-wheel:
     name: Build Python wheel
+    needs: verify-version
     runs-on: ubuntu-24.04
 
     steps:
