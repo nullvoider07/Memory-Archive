@@ -3,6 +3,99 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — 2026-07-29
+
+Control-Center 1.2.2 support, and a converter panic that voided a capture session.
+
+1.2.2 is the first Control-Center release since the gate landed where
+`crates/server/` **is** in the diff, so the review was not a formality. The findings:
+the `.proto` is untouched, so the wire shape is identical; the `CommandEvent`
+construction in `crates/server/src/main.rs` is not in the diff, so recorded events
+are built exactly as before; and the server changes are command-lifecycle
+correctness — a queue reaper, and failing outstanding commands when an agent
+disconnects — which alter `CommandResponse` for commands that were *never
+delivered*, not the content of events for commands that ran. `position_captured`
+keeps the meaning it took in 1.2.0: the settle before the first readback drops from
+50 ms to 10 ms on macOS and Linux, but behind the verify-and-retry loop that is the
+actual correctness mechanism, with 60/60 captures measured at both settings, and
+Windows is unchanged. Token revocation (`CC_REVOKED_SUBJECTS`) is opt-in and empty
+by default.
+
+One thing 1.2.2 does change is recorded content, on one platform: a Windows chord
+now reaches the record as the command that was issued rather than as the
+AutoHotkey wire form it is actuated through.
+
+### Security
+
+- **Raising the ceiling does not bless a weaker server.** The gate is a safety
+  control, so the review that raises it is part of the security surface, not
+  separate from it. `HARDENED` in the compatibility matrix is derived as
+  `staged_versions(minimum="1.1.0")`, so 1.2.2 was exercised for the TLS-only
+  connection and for failing loudly rather than stranding the session when the
+  token is missing; `LATEST` resolves to the newest staged release, which puts
+  1.2.2 under the CA-pinning, no-downgrade, strict-policy and provenance tests as
+  well. Control-Center's own changes in 1.2.2 add a revocation list
+  (`CC_REVOKED_SUBJECTS`, opt-in and empty by default) and remove no control:
+  TLS and the `monitor` scope on `WatchCommands` are still mandatory.
+
+- **No remaining slice hazards in the key converter.** The panic fixed below was
+  a backwards byte range, so the rest of `humanize_key` was audited for the same
+  class. The three surviving slices are sound: `end` is now derived from a search
+  that starts at `start`, and `{`, `}` and the modifier sigils are all ASCII, so
+  every index is a valid UTF-8 boundary even for a key string carrying multi-byte
+  text.
+
+- `cargo audit`: 0 vulnerabilities, and the same 10 allowed warnings triaged at
+  0.3.0 — no new advisories. The hermetic suite (`tests/run_all.sh`) passes 5/5,
+  including the installer traversal and checksum guards on both `install.sh` and
+  `install.ps1`.
+
+### Fixed
+
+- **A malformed key string panicked the converter and took the whole session with
+  it.** `humanize_key` located the opening brace with `find('{')` but the closing
+  one with `find('}')` searched from index 0, so a string whose `}` precedes its
+  `{` produced `end < start` and a slice that panicked — *byte index range starts
+  at 11 but ends at 9*. The panic killed the watch loop mid-session; Control-Center
+  reported every step as successful, and the session finalised with **zero steps
+  recorded**. One corpus session (S054) was lost this way before the cause was
+  found. The scan now starts at the opening brace, which restores the behaviour the
+  function's own doc comment promises: *never fails — unknown or malformed events
+  fall back to the raw command*. A malformed key must cost a poor label, not a
+  capture.
+
+  The input that triggered it came from Control-Center, and both halves of that
+  path are closed in 1.2.2 — the Windows controller no longer reports the AHK
+  expansion, and the agent no longer strips the outer braces off an explicit
+  down/up sequence. The fix here is still worth having on its own terms: this
+  converter is the last thing standing between a strange key string and a
+  destroyed session, and it does not get to choose its inputs.
+
+- Quote and backslash fidelity through the key converter is now pinned by tests
+  rather than assumed.
+
+### Changed
+
+- **The Control-Center ceiling is raised to 1.2.2** (`SUPPORTED_MAX`), verified by
+  the compatibility matrix against real 1.0.0, 1.1.0, 1.2.0, 1.2.1 and 1.2.2 server
+  binaries. The 1.2.2 archive is checksum-verified against the published
+  `SHA256SUMS` before extraction; 1.0.0–1.2.0 predate checksum publishing and are
+  staged unverified, as before. The matrix picked up 1.2.2 by discovery, with no
+  edit to a version list — which is what that change in 0.3.0 was for. 14
+  integration tests (was 12) and 103 unit tests (was 91), all passing;
+  `cargo audit` reports 0 vulnerabilities and the same 10 allowed warnings
+  triaged at 0.3.0.
+
+- **Windows chord steps are recorded as the chord.** Control-Center's Windows
+  controller was reporting the AutoHotkey transport form, so `press ^s` reached the
+  record as `{Ctrl down}s{Ctrl up}`; 1.2.2 reports the command as issued, and the
+  agent humanises it to `Ctrl+Shift+N` the same way every other platform does.
+  Memory Archive needs no change for this — `humanize_key` handles the prefix form,
+  the explicit down/up form, and the already-humanised string — but sessions
+  recorded before and after the Control-Center upgrade will label Windows chords
+  differently, and `actuation_agent_version` in `metadata.json` is what
+  distinguishes them.
+
 ## [0.3.0] — 2026-07-28
 
 Control-Center 1.2.1 support, and a version gate.

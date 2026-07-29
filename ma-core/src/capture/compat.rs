@@ -23,7 +23,7 @@ pub const SUPPORTED_MIN: Version = Version::new(1, 0, 0);
 
 /// Newest Control-Center this build has been verified against. Raise it only
 /// alongside a run of the compatibility matrix in `integration-tests/`.
-pub const SUPPORTED_MAX: Version = Version::new(1, 2, 1);
+pub const SUPPORTED_MAX: Version = Version::new(1, 2, 2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn every_version_in_the_matrix_is_supported() {
-        for v in ["1.0.0", "1.1.0", "1.2.0", "1.2.1"] {
+        for v in ["1.0.0", "1.1.0", "1.2.0", "1.2.1", "1.2.2"] {
             assert!(
                 matches!(evaluate(v, None), Compat::Supported(_)),
                 "{v} is exercised by the compatibility matrix and must pass the gate"

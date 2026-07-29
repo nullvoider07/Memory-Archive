@@ -6,11 +6,16 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.3.0  
+**Version:** 0.3.1  
 **Last Updated:** July 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.3.0** — Control-Center 1.2.1 support, and a version gate so an unverified Control-Center can never record silently:
+> **✨ What's new in 0.3.1** — Control-Center 1.2.2 support, and a converter panic that voided a capture session:
+> - **A malformed key string no longer panics the converter and destroys the session.** `humanize_key` found the opening brace with `find('{')` but the closing one with `find('}')` searched from index 0, so a string whose `}` precedes its `{` sliced backwards and panicked. The panic killed the watch loop mid-session: Control-Center reported every step as successful and the session finalised with **zero steps recorded**. One corpus session was lost before the cause was found. The scan now starts at the opening brace, restoring what the function's doc comment already promised — a malformed key costs a poor label, not a capture.
+> - **Control-Center 1.2.2 is supported**, verified by the compatibility matrix against real 1.0.0 through 1.2.2 server binaries. 1.2.2 is the first release since the gate landed that touches `crates/server/`, so the review was not a formality: the `.proto` is untouched, `CommandEvent` construction is not in the diff, and the server changes are command-lifecycle correctness affecting responses for commands that were never delivered — not the content of events for commands that ran. `position_captured` keeps its 1.2.0 meaning.
+> - **Windows chord steps are recorded as the chord.** Control-Center's Windows controller reported the AutoHotkey transport form, so `press ^s` reached the record as `{Ctrl down}s{Ctrl up}`; 1.2.2 reports the command as issued. Memory Archive needs no change — but Windows sessions recorded either side of that upgrade label chords differently, and `actuation_agent_version` is what tells them apart.
+>
+> Earlier in 0.3.0 — Control-Center 1.2.1 support, and a version gate so an unverified Control-Center can never record silently:
 > - **Memory Archive now refuses to record against a Control-Center version it has not been verified against.** The capture stream reads `GetServerIdentity` before subscribing; an unsupported version marks the session `incomplete` and exits non-zero instead of recording under semantics this build does not know. It refuses rather than adapts on purpose: protobuf already absorbs *additive* wire changes, but a field can change **meaning** with no change on the wire — `position_captured` did exactly that in 1.2.0 — and nothing observable at runtime can distinguish the two. Guessing would turn a loud failure into a silent one, and the artefact is a session that records confidently and wrongly. Two explicit escapes: `control_center_max_version` raises the ceiling without a rebuild (it only ever raises), and `control_center_allow_unsupported` bypasses the gate while logging the refusal on every connect. A server that reports no version is **not** refused — Control-Center 1.0.0 predates the check.
 > - **A pinned Control-Center CA now excludes the platform trust store.** With `control_center_tls_ca` set, the TLS config previously enabled the system roots *and* added the configured CA — both inputs are additive — so every publicly trusted CA stayed acceptable for the Control-Center name while the connection looked pinned. Platform roots are now used only when no CA is configured.
 > - **Sessions record the Control-Center *server* version** (`actuation_server_version`) alongside the agent version, and a mismatch is logged. The two halves install independently, and Control-Center 1.2.1 warns that a split pair fails actuation closed while still reporting success.
@@ -953,7 +958,7 @@ Check `ma-core` connectivity. Sends a `Ping` IPC message and prints the `ma-core
 
 ```bash
 memory-archive ping
-# → ma-core v0.3.0 — OK
+# → ma-core v0.3.1 — OK
 ```
 
 ---
@@ -1417,14 +1422,14 @@ When `memory-archive annotator claim` is used (remote mode), the TUI starts a da
 
 ### Control-Center Compatibility
 
-Memory Archive supports **Control-Center 1.0.0 through 1.2.1** from a single configuration. Two regimes exist, and the boundary is 1.1.0:
+Memory Archive supports **Control-Center 1.0.0 through 1.2.2** from a single configuration. Two regimes exist, and the boundary is 1.1.0:
 
-| | 1.0.0 | 1.1.0 | 1.2.0 | 1.2.1 |
-|---|---|---|---|---|
-| TLS on the gRPC listener | not supported | **required** | **required** | **required** |
-| `monitor` scope on `WatchCommands` | not enforced | **required** | **required** | **required** |
-| `CommandEvent` wire format | identical | identical | identical | identical |
-| `position_captured` meaning | best-effort readback | best-effort readback | **verified, or `false`** | **verified, or `false`** |
+| | 1.0.0 | 1.1.0 | 1.2.0 | 1.2.1 | 1.2.2 |
+|---|---|---|---|---|---|
+| TLS on the gRPC listener | not supported | **required** | **required** | **required** | **required** |
+| `monitor` scope on `WatchCommands` | not enforced | **required** | **required** | **required** | **required** |
+| `CommandEvent` wire format | identical | identical | identical | identical | identical |
+| `position_captured` meaning | best-effort readback | best-effort readback | **verified, or `false`** | **verified, or `false`** | **verified, or `false`** |
 
 Every row above is verified against real release binaries by the compatibility suite in `integration-tests/`, which discovers releases from the GitHub API rather than a written-down list.
 
