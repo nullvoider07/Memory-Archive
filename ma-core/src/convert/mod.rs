@@ -558,6 +558,27 @@ mod tests {
         assert_eq!(to_human_readable(&e), "Press: Ctrl+A");
     }
 
+    // Typed text is copied out from behind the "Typed: " prefix and nothing else is
+    // parsed, so quotes and backslashes are carried through untouched. Control-Center
+    // pins the other end of this (tests/unit/test_actuation_argv.py, QUOTED_PAYLOADS);
+    // between them the corpus rule against quotes in a `type` command has no basis
+    // left in either repo.
+    #[test]
+    fn typed_text_keeps_its_quotes_and_backslashes() {
+        for payload in [
+            r#"printf "Title\nBody" > note.txt"#,
+            r#"osascript -e "tell app \"X\" to y""#,
+            r"ends with a backslash \",
+            r#"both "quoted" and trailing \"#,
+        ] {
+            let e = event(
+                "keyboard", "type", &format!("Typed: {payload}"), true, false, 0, 0, false,
+            );
+            assert_eq!(to_human_readable(&e), format!("Type: {payload}"));
+            assert_eq!(to_cc_command(&e), format!("type {payload}"));
+        }
+    }
+
     // The regression: a Windows agent that stripped the outer braces sent
     // "Ctrl down}a{Ctrl up", where '}' precedes '{'. Searching for the closing brace
     // from index 0 produced end < start, and the slice panicked inside the watch
