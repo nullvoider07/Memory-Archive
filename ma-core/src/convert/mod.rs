@@ -70,7 +70,14 @@ fn humanize_key(key: &str) -> String {
                 if !before.is_empty() && !before.chars().all(|c| c == ' ') {
                     base.push_str(before);
                 }
-                if let Some(end) = remaining.find('}') {
+                // Search for the closing brace from the opening one. Searching from 0
+                // finds a '}' that precedes the '{' when the key string is malformed
+                // (an outer brace pair stripped upstream leaves "Ctrl down}a{Ctrl up"),
+                // which made the slice below panic and take the watch loop — and the
+                // whole capture session — down with it. This function documents itself
+                // as infallible; a malformed key must degrade to a poor label, not an
+                // aborted session.
+                if let Some(end) = remaining[start..].find('}').map(|offset| start + offset) {
                     let token = &remaining[start + 1..end];
                     if token.ends_with(" down") {
                         let modifier = token.trim_end_matches(" down");
@@ -540,5 +547,34 @@ mod tests {
     fn test_cc_position() {
         let e = event("position", "", "position", true, false, 512, 300, true);
         assert_eq!(to_cc_command(&e), "position");
+    }
+
+    // A well-formed explicit sequence still reads as the chord it is.
+    #[test]
+    fn test_keyboard_press_explicit_down_up() {
+        let e = event(
+            "keyboard", "press", "Pressed: {Ctrl down}a{Ctrl up}", true, false, 0, 0, false,
+        );
+        assert_eq!(to_human_readable(&e), "Press: Ctrl+A");
+    }
+
+    // The regression: a Windows agent that stripped the outer braces sent
+    // "Ctrl down}a{Ctrl up", where '}' precedes '{'. Searching for the closing brace
+    // from index 0 produced end < start, and the slice panicked inside the watch
+    // loop, so the session recorded zero steps and the operator saw no error until
+    // `done`. A malformed key is allowed to convert badly; it is not allowed to abort.
+    #[test]
+    fn malformed_brace_order_does_not_panic() {
+        for raw in [
+            "Pressed: Ctrl down}a{Ctrl up",
+            "Pressed: Ctrl down}{Tab}{Ctrl up",
+            "Pressed: Ctrl down}{Shift down}{Esc}{Shift up}{Ctrl up",
+            "Pressed: }{ down}",
+            "Pressed: } up}",
+        ] {
+            let e = event("keyboard", "press", raw, true, false, 0, 0, false);
+            let converted = to_human_readable(&e);
+            assert!(converted.starts_with("Press: "), "{raw:?} → {converted:?}");
+        }
     }
 }
