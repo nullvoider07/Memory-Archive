@@ -499,6 +499,58 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Retention sweep — remove interrupted captures past INCOMPLETE_RETENTION_SECONDS.
+    //
+    // This is the only status with a retention bound, and it is enforced here
+    // rather than by a Redis TTL: expiry runs no application code, so it would
+    // drop the record and leave the session's frames on disk unreachable. Record,
+    // stored objects and directory are removed together, in that order, so a
+    // failure part-way leaves the record behind and the sweep retries next start.
+    {
+        let cutoff = chrono::Utc::now()
+            - chrono::Duration::seconds(registry::schema::INCOMPLETE_RETENTION_SECONDS);
+        match registry.list_incomplete_before(cutoff).await {
+            Err(e) => tracing::warn!("Retention sweep: scan failed, skipping: {e}"),
+            Ok(expired) => {
+                for session_id in expired {
+                    let record = match registry.get(&session_id).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(session_id = %session_id, "Retention sweep: failed to get record: {e}");
+                            continue;
+                        }
+                    };
+
+                    if let Err(e) = registry.delete_session(&session_id, Some(&record)).await {
+                        tracing::error!(session_id = %session_id, "Retention sweep: Redis purge failed, keeping data: {e}");
+                        continue;
+                    }
+
+                    let storage = storage_router.resolve_for_session(&record);
+                    let objects_removed = storage.delete_all(&session_id).await.unwrap_or_else(|e| {
+                        tracing::warn!(session_id = %session_id, "Retention sweep: storage purge failed: {e}");
+                        0
+                    });
+
+                    let dir_removed = session::purge_memory_dir(&record.memory_path, &session_id)
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(session_id = %session_id, "Retention sweep: local dir purge failed: {e}");
+                            false
+                        });
+
+                    tracing::info!(
+                        session_id = %session_id,
+                        memory_name = %record.memory_name,
+                        incomplete_since = %record.updated_at,
+                        objects_removed,
+                        dir_removed,
+                        "Retention sweep: interrupted capture removed"
+                    );
+                }
+            }
+        }
+    }
+
     let socket_path = std::path::PathBuf::from(&cfg.ipc_socket_path);
 
     let done_handles = crate::capture::DoneHandleMap::default();

@@ -20,19 +20,45 @@ pub enum SessionStatus {
     Incomplete,
 }
 
+/// How long an interrupted capture is kept before the retention sweep removes it.
+///
+/// `Incomplete` marks an aborted take whose partial capture is usually discarded.
+/// A year is long enough that a take worth salvaging can still be recovered, and
+/// short enough that scrapped runs do not accumulate indefinitely.
+///
+/// This is deliberately *not* a Redis TTL. Key expiry runs no application code, so
+/// it can only drop the 1.8 KB registry record while the session's frames — the
+/// actual bytes — stay on disk with nothing left pointing at them. Retention is
+/// enforced by the sweep in `main.rs`, which removes the record, the stored objects
+/// and the directory together.
+pub const INCOMPLETE_RETENTION_SECONDS: i64 = 365 * 24 * 60 * 60;
+
 impl SessionStatus {
     /// TTL in seconds to apply when transitioning to this status.
     /// Returns None for statuses that should have no TTL set.
+    ///
+    /// No status expires. Every session record is the only index from a session id
+    /// to its `memory_path`, and nothing can rebuild one from disk — the reconcile
+    /// sweep seeds from the Redis index sets, so it repairs only records that still
+    /// exist. Expiring a key therefore cleans nothing up; it strands the recording
+    /// on disk with no way to reach it through the CLI.
+    ///
+    /// `Incomplete` is bounded too, but by the retention sweep rather than a TTL,
+    /// so the record and the directory are removed in the same operation. See
+    /// `INCOMPLETE_RETENTION_SECONDS`.
+    ///
+    /// Kept as `Option` so a future status can opt into expiry, and so
+    /// `update_status` keeps clearing stale TTLs left by earlier versions.
     pub fn ttl_seconds(&self) -> Option<u64> {
         match self {
             SessionStatus::Active => None,
-            SessionStatus::Annotating => Some(7 * 24 * 60 * 60),   // 7 days
+            SessionStatus::Annotating => None,
             SessionStatus::PendingCompilation => None,
-            SessionStatus::PendingAnnotation => Some(7 * 24 * 60 * 60),   // 7 days
+            SessionStatus::PendingAnnotation => None,
             SessionStatus::PendingHumanAnnotation => None,
-            SessionStatus::ReasoningDegraded => Some(7 * 24 * 60 * 60),   // 7 days
-            SessionStatus::Incomplete => Some(30 * 24 * 60 * 60),         // 30 days
-            SessionStatus::Complete => Some(90 * 24 * 60 * 60),           // 90 days
+            SessionStatus::ReasoningDegraded => None,
+            SessionStatus::Complete => None,
+            SessionStatus::Incomplete => None,
         }
     }
 

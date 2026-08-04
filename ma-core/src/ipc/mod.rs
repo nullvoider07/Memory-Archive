@@ -1206,12 +1206,10 @@ async fn handle_message(
                 };
             }
 
-            const NINETY_DAYS_SECS: u64 = 90 * 24 * 3600;
-            if let Err(e) = registry.set_ttl(&session_id, NINETY_DAYS_SECS).await {
-                tracing::warn!(session_id = %session_id, "FinalizeMemory: TTL set failed: {e}");
-            }
-
-            tracing::info!(session_id = %session_id, "Memory finalized — status → complete, TTL 90d");
+            // No TTL is set here. A finalized memory is the finished product, and
+            // the update_status call above already cleared any expiry the record
+            // carried from an earlier status.
+            tracing::info!(session_id = %session_id, "Memory finalized — status → complete");
             OutboundMessage::MemoryFinalized { session_id }
         }
 
@@ -1830,7 +1828,7 @@ async fn handle_message(
                             0
                         });
 
-                    let local_dir_removed = crate::session::purge_memory_dir(&record.memory_path)
+                    let local_dir_removed = crate::session::purge_memory_dir(&record.memory_path, &session_id)
                         .unwrap_or_else(|e| {
                             tracing::warn!(session_id = %session_id, "DeleteSession: local dir purge failed: {e}");
                             false

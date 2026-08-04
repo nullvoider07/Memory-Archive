@@ -3,6 +3,85 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] — 2026-08-04
+
+Session registry records no longer expire, and deletion can no longer remove a
+recording it does not own.
+
+A 101-session corpus was found to be missing 21 registry records — every macOS
+session from its first fortnight. The capture data was intact on disk in all 21
+cases; only the Redis Hash was gone, and since `annotate`, `compile` and `status`
+all resolve a session through that record, the recordings were unreachable. There
+is no import path to rebuild one, so they had to be reconstructed by hand from
+each `metadata.json`.
+
+The cause was a TTL, not a fault. Session records carried expiries of 7 days while
+pending or annotating, 30 days when incomplete, and 90 days once complete, so the
+boundary fell exactly where the recording dates crossed the 7-day line. At the
+point of diagnosis the next record was 24 minutes from expiring and 22 more were
+inside a day.
+
+### Fixed
+
+- **Session registry records no longer expire.** `SessionStatus::ttl_seconds()`
+  returns `None` for every status. Expiry could never reclaim a session's bytes —
+  those are the frames on disk, not the 1.8 KB record — so it only dropped the
+  pointer and stranded the payload. Records are removed explicitly, through
+  `delete_session`, which drops the Hash, every index set, the stored objects and
+  the directory together.
+- **Finalize no longer sets its own TTL.** `FinalizeMemory` applied a hardcoded 90
+  days independently of `ttl_seconds()`, so changing the status table alone would
+  have left every finalized memory expiring on the old schedule.
+- **`update_status` now clears a stale TTL.** It previously only ever *set* one, so
+  returning `None` could not remove an expiry a key already carried. Added
+  `SessionRegistry::clear_ttl` (Redis `PERSIST`) on the `None` branch — this is
+  also what makes the fix retroactive, since existing records shed their old
+  expiry the next time their status is written rather than needing a manual sweep.
+- **Deletion no longer purges a directory it does not own.** `memory_path` does not
+  uniquely identify a session: when a scrapped take is re-recorded under the same
+  `memory_name`, the replacement occupies the same path while the abandoned record
+  keeps pointing at it. `purge_memory_dir` therefore took the *successful*
+  recording. It now requires the directory's `metadata.json` to name the session
+  being deleted, and leaves anything it cannot prove it owns in place. Two live
+  examples were found in the affected corpus, each aimed at a complete recording.
+  Ownership is read as untyped JSON rather than through `metadata::read`, so a
+  session written before a field was added to `SessionMetadata` stays deletable.
+
+### Added
+
+- **Retention sweep for interrupted captures.** `Incomplete` is the one status with
+  a retention bound, `INCOMPLETE_RETENTION_SECONDS`, at one year. It is enforced by
+  a startup sweep rather than a TTL: key expiry runs no application code, so it
+  could only ever drop the record and orphan the frames. The sweep removes the
+  record, the stored objects and the directory in one operation, and retries on the
+  next start if any step fails. `SessionRegistry::list_incomplete_before` scans
+  `session:*` rather than reading an index set, since `Incomplete` has none and
+  sessions marked by earlier versions were never indexed.
+
+### Tests
+
+- **Registry unit tests moved to Redis DB 15.** They ran against DB 0 — the live
+  session registry — relying on random UUIDs and a `cleanup()` at the end of each
+  test. The first run of this release proved that insufficient: the stale
+  `Annotating` TTL assertion panicked before its cleanup and left an orphan record
+  and three index-set memberships behind in real corpus data. The DB index now
+  matches `REDIS_TEST_DB` in `integration-tests/harness.py`.
+- `test_annotating_status_uses_index_and_ttl` asserted the 7-day expiry this
+  release removes. Renamed and inverted: an annotating session must now carry
+  `TTL -1`.
+- Added coverage for the two behaviours this release introduces —
+  `update_status` clearing a pre-existing TTL, and `list_incomplete_before`
+  selecting only `incomplete` records that are both past the cutoff and datable.
+
+### Notes
+
+- The sweep runs at startup only. A process running longer than the retention
+  period will not clean up until it restarts.
+- Records that cannot be dated — no readable `updated_at` — are skipped rather than
+  deleted. Retention never removes a session it cannot age.
+- `cargo audit`: 0 vulnerabilities, and the same 10 allowed warnings triaged at
+  0.3.1 — unchanged, since no dependency moved in this release.
+
 ## [0.3.1] — 2026-07-29
 
 Control-Center 1.2.2 support, and a converter panic that voided a capture session.

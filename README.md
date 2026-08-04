@@ -6,11 +6,16 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.3.1  
-**Last Updated:** July 2026  
+**Version:** 0.3.2  
+**Last Updated:** August 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.3.1** — Control-Center 1.2.2 support, and a converter panic that voided a capture session:
+> **✨ What's new in 0.3.2** — session registry records no longer expire, and deletion can no longer remove a recording it does not own:
+> - **Session registry records no longer expire.** Records carried a Redis TTL — 7 days while pending or annotating, 30 days when incomplete, 90 days once complete. Expiry could never reclaim a session's bytes, because those are the frames on disk and not the 1.8 KB record, so it only dropped the pointer and stranded the payload: `annotate`, `compile` and `status` all resolve a session through that record, and nothing can rebuild one from disk. A 101-session corpus lost 21 records this way — every session from its first fortnight, capture data intact, all of it unreachable. `ttl_seconds()` now returns `None` for every status, `FinalizeMemory` no longer applies its own hardcoded 90 days, and `update_status` *clears* a stale TTL rather than only ever setting one, which is what makes the fix retroactive for records written by earlier versions.
+> - **Deletion no longer purges a directory it does not own.** `memory_path` does not uniquely identify a session: when a scrapped take is re-recorded under the same `memory_name`, the replacement occupies the same path while the abandoned record keeps pointing at it — so purging by path took the *successful* recording. Two live examples were found in the affected corpus, each aimed at a complete recording. `purge_memory_dir` now requires the directory's `metadata.json` to name the session being deleted, and leaves anything it cannot prove it owns in place.
+> - **Interrupted captures are bounded by a retention sweep, not a TTL.** `Incomplete` is the one status with a retention limit, at one year. Key expiry runs no application code, so a TTL could only ever drop the record and orphan the frames; the startup sweep removes the record, the stored objects and the directory in one operation, and skips any record it cannot date.
+>
+> Earlier in 0.3.1 — Control-Center 1.2.2 support, and a converter panic that voided a capture session:
 > - **A malformed key string no longer panics the converter and destroys the session.** `humanize_key` found the opening brace with `find('{')` but the closing one with `find('}')` searched from index 0, so a string whose `}` precedes its `{` sliced backwards and panicked. The panic killed the watch loop mid-session: Control-Center reported every step as successful and the session finalised with **zero steps recorded**. One corpus session was lost before the cause was found. The scan now starts at the opening brace, restoring what the function's doc comment already promised — a malformed key costs a poor label, not a capture.
 > - **Control-Center 1.2.2 is supported**, verified by the compatibility matrix against real 1.0.0 through 1.2.2 server binaries. 1.2.2 is the first release since the gate landed that touches `crates/server/`, so the review was not a formality: the `.proto` is untouched, `CommandEvent` construction is not in the diff, and the server changes are command-lifecycle correctness affecting responses for commands that were never delivered — not the content of events for commands that ran. `position_captured` keeps its 1.2.0 meaning.
 > - **Windows chord steps are recorded as the chord.** Control-Center's Windows controller reported the AutoHotkey transport form, so `press ^s` reached the record as `{Ctrl down}s{Ctrl up}`; 1.2.2 reports the command as issued. Memory Archive needs no change — but Windows sessions recorded either side of that upgrade label chords differently, and `actuation_agent_version` is what tells them apart.
@@ -239,7 +244,7 @@ Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) an
 **Compilation:**
 - Generate `memory.md` scaffold from `reasoning.jsonl` (`run_compile`)
 - Open `CompilerApp` for full-screen terminal editing
-- Finalize session (status → `complete`, Redis 90-day TTL, `FinalizeMemory` IPC) on editor save
+- Finalize session (status → `complete`, `FinalizeMemory` IPC) on editor save
 
 **Remote annotation:**
 - Register annotators via admin CLI or REST API
@@ -280,7 +285,7 @@ Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) an
 
 ### Detailed Capability Descriptions
 
-**Session Lifecycle Management.** Every Memory Archive recording begins with a session registration IPC call that creates a Redis hash for the session and initializes the memory directory structure on disk or cloud. The session moves through a well-defined state machine — `active` → `pending_annotation` → `annotating` → `pending_compilation` → `complete` — with defined exception paths for incomplete disconnects and VLM degradation. Redis Set indexes (`sessions:active`, `sessions:pending`, etc.) allow O(1) membership checks and fast queue operations. On `ma-core` startup, a startup sweep inspects all sessions with `active` or `annotating` status and marks those whose associated processes are no longer running as `incomplete` or re-queues them. A reconcile sweep re-queues any orphaned `annotating` sessions that have no live heartbeat. TTLs are enforced in Redis: `incomplete` sessions expire after 7 days, `complete` sessions after 90 days.
+**Session Lifecycle Management.** Every Memory Archive recording begins with a session registration IPC call that creates a Redis hash for the session and initializes the memory directory structure on disk or cloud. The session moves through a well-defined state machine — `active` → `pending_annotation` → `annotating` → `pending_compilation` → `complete` — with defined exception paths for incomplete disconnects and VLM degradation. Redis Set indexes (`sessions:active`, `sessions:pending`, etc.) allow O(1) membership checks and fast queue operations. On `ma-core` startup, a startup sweep inspects all sessions with `active` or `annotating` status and marks those whose associated processes are no longer running as `incomplete` or re-queues them. A reconcile sweep re-queues any orphaned `annotating` sessions that have no live heartbeat. Session records do not expire — the record is the only index from a session id to its capture on disk, and nothing can rebuild one, so a TTL would strand the recording rather than reclaim anything. Records are removed explicitly, through `delete_session`, which drops the Hash, every index set, the stored objects and the directory together. `incomplete` is the one status with a retention limit, at one year, enforced by a startup sweep rather than a TTL so that the record and the frames are removed in the same operation.
 
 **Capture and Command Processing.** The capture loop (`run_watch_loop`) supports two event sources — direct gRPC streaming from Control-Center or Kafka consumption (cloud_primary mode). In gRPC mode, the `WatchStream` connects directly to the Control-Center WatchCommands endpoint, presenting a `monitor`-scoped bearer token and negotiating the transport (see [Control-Center compatibility](#control-center-compatibility)); the stream must be established before `start` reports success, so a session can never come up `active` while recording nothing. In Kafka mode, `StreamConsumer` subscribes to the `control-center-events` topic, consuming from the partition keyed to the session's `session_id`. Position-only events are silently dropped; heartbeat-only messages from Control-Center are filtered before any processing. For each non-position event, the capture loop writes four files atomically: `raw_input.md` (raw command string), `converted_input.md` (human-readable), `actuation_commands.json` (full CommandEvent JSON), and `cc_commands.json` (Control-Center replay format). The `convert` module normalizes key names per OS (`humanize_key`) and generates grammatically correct human-readable descriptions. Silence detection monitors the time since the last non-position event; if the configurable `silence_timeout_seconds` elapses without activity, the session is gracefully disconnected.
 
@@ -290,7 +295,7 @@ Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) an
 
 **VLM Reasoning Pipeline.** In automated mode, `ma-core` emits a `StepReadyForReasoning` IPC push event per step. `ma-app`'s `ReasoningPipeline` receives the push, applies the session's routing policy via `ModelRouter`, and dispatches the request to the selected `ModelBackend` — either `GenericApiModelBackend` (any OpenAI-compatible endpoint) or `InternalModelBackend` (Proprietary VLM). Rate limiting is applied via a sliding-window `RateLimiter` across both `requests_per_minute` and `token_budget_per_hour`. The per-session circuit breaker in `ReasoningPipeline` counts non-retryable failures; at the threshold, it opens, all subsequent requests for that session return `model_degraded`, and after `circuit_breaker_reset_seconds`, a single half-open trial request is sent. If the trial succeeds, the circuit closes. On `ReasoningResult` return, `ma-core` writes the reasoning to `reasoning.jsonl`, updates `metadata.json` token counts, and advances the session.
 
-**Human Annotation TUI.** `AnnotationApp` is a Textual-based terminal application providing a two-pane interface: a virtual-scrolling `StepList` on the left (with step status icons and accordion expansion) and an image preview pane on the right. The `ReasoningEditor` widget supports multi-line input, word counting, undo/redo with Ctrl+Z/Y, clipboard, and autosave every 2.5 seconds. `SessionLoader` reads all existing `reasoning.jsonl` entries and `metadata.json` on open, pre-populating the step list. `ReasoningWriter` performs atomic upserts to `reasoning.jsonl`. After all steps are annotated, `AnnotationComplete` overlay offers to launch `CompilerApp` immediately. `CompilerApp` is a full-screen terminal text editor with autosave, a `CompilerStatusBar` showing word count and save state, and a quit overlay. On save, it calls `FinalizeMemory` IPC, setting session status to `complete` and applying a 90-day Redis TTL.
+**Human Annotation TUI.** `AnnotationApp` is a Textual-based terminal application providing a two-pane interface: a virtual-scrolling `StepList` on the left (with step status icons and accordion expansion) and an image preview pane on the right. The `ReasoningEditor` widget supports multi-line input, word counting, undo/redo with Ctrl+Z/Y, clipboard, and autosave every 2.5 seconds. `SessionLoader` reads all existing `reasoning.jsonl` entries and `metadata.json` on open, pre-populating the step list. `ReasoningWriter` performs atomic upserts to `reasoning.jsonl`. After all steps are annotated, `AnnotationComplete` overlay offers to launch `CompilerApp` immediately. `CompilerApp` is a full-screen terminal text editor with autosave, a `CompilerStatusBar` showing word count and save state, and a quit overlay. On save, it calls `FinalizeMemory` IPC, setting session status to `complete`.
 
 ---
 
@@ -411,7 +416,7 @@ cd ma-app
 pip install .
 
 # Verify
-ma-core --version
+memory-archive version
 memory-archive ping
 ```
 
@@ -552,7 +557,7 @@ If you did not compile from the `AnnotationComplete` overlay, run:
 memory-archive compile --session "$SESSION_ID"
 ```
 
-`CompilerApp` opens with a scaffold of `memory.md` generated from your reasoning. Edit the document to your satisfaction, then press `Ctrl+Q` and save. `FinalizeMemory` IPC is called: session status → `complete`, Redis 90-day TTL applied.
+`CompilerApp` opens with a scaffold of `memory.md` generated from your reasoning. Edit the document to your satisfaction, then press `Ctrl+Q` and save. `FinalizeMemory` IPC is called: session status → `complete`.
 
 **Step 10 — View results**
 
@@ -803,7 +808,9 @@ SESSION_ID=$(memory-archive session register \
 
 Permanently purge a session from everywhere. Removes the Redis record and every index/claim entry (`session:{id}`, all status sets, `sessions:by_os:*`, `sessions:by_mode:*`, `claim:{id}`), all stored files (cloud objects under `sessions/{id}/…` and the local memory directory plus any `(incomplete)` sibling), and the client-side temp/scratch directory. This cannot be undone.
 
-If the Redis record has already expired, the command still sweeps orphaned index/claim entries and any leftover storage, so it doubles as a cleaner for stale sessions. Active or annotating sessions are refused unless `--force` is given.
+If the Redis record is already gone, the command still sweeps orphaned index/claim entries and any leftover storage, so it doubles as a cleaner for stale sessions. Active or annotating sessions are refused unless `--force` is given.
+
+A memory directory is removed only when its `metadata.json` names the session being deleted. `memory_path` does not uniquely identify a session — a scrapped take re-recorded under the same `memory_name` occupies the same directory while the abandoned record still points at it — so a directory whose metadata is missing, unreadable, or names a different session is left in place and reported. Deletion never removes a recording it cannot prove it owns.
 
 ```
 memory-archive session delete [OPTIONS]
@@ -958,7 +965,7 @@ Check `ma-core` connectivity. Sends a `Ping` IPC message and prints the `ma-core
 
 ```bash
 memory-archive ping
-# → ma-core v0.3.1 — OK
+# → ma-core v0.3.2 — OK
 ```
 
 ---
@@ -1358,7 +1365,7 @@ An external image viewer can be opened: `feh` on Linux, `open` on macOS, and `os
 
 After annotation is complete (either via `AnnotationComplete` overlay or `memory-archive compile`), `CompilerApp` opens. It is a full-screen terminal text editor built as a `CompilerScreen` Textual widget. On open, `run_compile` generates a `memory.md` scaffold from `reasoning.jsonl`, inserting the step reasoning in document order with headers for each step. The editor supports all standard text editing operations.
 
-`CompilerStatusBar` is displayed at the bottom, showing the current word count and save state (`Saved` / `Unsaved`). Autosave fires every 2.5 seconds when content has changed. On `Ctrl+Q`, the `CompilerQuitOverlay` prompts to save or discard. If the user saves and exits, the `FinalizeMemory` IPC message is sent to `ma-core`, which sets the session status to `complete` and applies a 90-day Redis TTL. The finalized `memory.md` and all session files remain accessible until the TTL expires.
+`CompilerStatusBar` is displayed at the bottom, showing the current word count and save state (`Saved` / `Unsaved`). Autosave fires every 2.5 seconds when content has changed. On `Ctrl+Q`, the `CompilerQuitOverlay` prompts to save or discard. If the user saves and exits, the `FinalizeMemory` IPC message is sent to `ma-core`, which sets the session status to `complete`. The finalized `memory.md` and all session files remain accessible indefinitely — a completed session is never expired, and is removed only by an explicit `memory-archive session delete`.
 
 ### Remote Annotator Mode Behavior
 
@@ -1599,7 +1606,7 @@ Rules are evaluated top-to-bottom; the first matching rule wins. An empty `match
 
 | Key pattern | Type | Description | TTL |
 |---|---|---|---|
-| `session:{session_id}` | Hash | All session fields (see below) | None (managed by status transitions) |
+| `session:{session_id}` | Hash | All session fields (see below) | None — never expires; removed explicitly by `delete_session` |
 | `claim:{session_id}` | String | `{annotator_id}:{claim_id}` | 30 min (refreshed by heartbeat) |
 | `annotator:{annotator_id}` | Hash | Credential hash, status, claim counts, allowed tenants | None |
 | `sessions:active` | Set | Session IDs with status `active` | None |
@@ -1607,6 +1614,7 @@ Rules are evaluated top-to-bottom; the first matching rule wins. An empty `match
 | `sessions:pending_human_annotation` | Set | Session IDs with status `pending_human_annotation` | None |
 | `sessions:annotating` | Set | Session IDs with status `annotating` | None |
 | `sessions:pending_compilation` | Set | Session IDs with status `pending_compilation` | None |
+| `sessions:reasoning_degraded` | Set | Session IDs with status `reasoning_degraded` | None |
 | `sessions:by_os:{OS_TYPE}` | Set | Session IDs indexed by OS type | None |
 | `sessions:by_mode:{mode}` | Set | Session IDs indexed by capture mode | None |
 
@@ -1652,6 +1660,13 @@ context_window_steps        steps of context sent to VLM per request
 
 ### TTL Rules
 
+**No session status carries a TTL.** The record is the only index from a session id
+to its capture on disk, and nothing can rebuild one from disk — the reconcile sweep
+seeds from the Redis index sets, so it repairs only records that still exist.
+Expiring a key therefore reclaims nothing: a session's bytes are its frames, not the
+1.8 KB Hash, so the payload survives and the pointer is lost. Records are removed
+explicitly, via `delete_session`.
+
 | Status | TTL | Notes |
 |---|---|---|
 | `active` | None | Removed from set on status transition |
@@ -1659,9 +1674,25 @@ context_window_steps        steps of context sent to VLM per request
 | `pending_human_annotation` | None | Removed from set when claimed |
 | `annotating` | None (claim TTL: 30 min rolling) | Claim expires if heartbeat stops |
 | `pending_compilation` | None | Removed on FinalizeMemory |
-| `complete` | 90 days | Set at FinalizeMemory |
-| `incomplete` | 7 days | Set at disconnect without done |
+| `complete` | None | Set at FinalizeMemory |
+| `incomplete` | None — retention sweep at 1 year | Set at disconnect without done |
 | `reasoning_degraded` | None | Transitions to `pending_human_annotation` on completion |
+
+`incomplete` is the one status with a retention bound, `INCOMPLETE_RETENTION_SECONDS`
+(one year). It is enforced by a sweep at `ma-core` startup, not a TTL: Redis key
+expiry runs no application code, so it could only ever drop the record and orphan the
+frames. The sweep removes the record, the stored objects and the directory together,
+retries on the next start if any step fails, and skips any record whose `updated_at`
+cannot be read — retention never deletes a session it cannot age. Because it runs at
+startup only, a process running longer than the retention period will not clean up
+until it restarts.
+
+Before 0.3.2 the table above was wrong in both directions: `pending_annotation` and
+`annotating` carried 7 days, `incomplete` 30, and `complete` 90 — set in two
+independent places, since `FinalizeMemory` applied its own hardcoded 90 days without
+consulting the status table. Records written by those versions shed their expiry the
+next time their status is written, because `update_status` now clears a TTL rather
+than only ever setting one.
 
 ### Per-Session Server Address Management
 

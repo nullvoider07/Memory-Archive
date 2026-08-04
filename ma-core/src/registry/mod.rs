@@ -4,7 +4,7 @@ pub mod schema;
 use std::collections::HashMap;
 
 use anyhow::Context;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use redis::AsyncCommands;
 use sha2::{Digest, Sha256};
 
@@ -153,9 +153,13 @@ impl SessionRegistry {
                 .context("SADD new status index failed")?;
         }
 
-        // Apply TTL if this status requires one.
-        if let Some(ttl) = new_status.ttl_seconds() {
-            self.set_ttl(session_id, ttl).await?;
+        // Apply the TTL this status requires, or clear any TTL carried over from a
+        // previous status. Without the clear, a session that passed through
+        // Incomplete would keep that expiry for the rest of its life, and records
+        // written under the earlier per-status TTLs would never shed them.
+        match new_status.ttl_seconds() {
+            Some(ttl) => self.set_ttl(session_id, ttl).await?,
+            None => self.clear_ttl(session_id).await?,
         }
 
         tracing::info!(
@@ -225,6 +229,26 @@ impl SessionRegistry {
             skipped,
             "Annotation counters updated in Redis"
         );
+
+        Ok(())
+    }
+
+    /// Remove any expiry from a session key (Redis PERSIST), making the record
+    /// durable until it is deleted explicitly. Safe on a key that has no TTL.
+    pub async fn clear_ttl(&mut self, session_id: &str) -> anyhow::Result<()> {
+        let key = session_key(session_id);
+
+        let removed: bool = self.conn
+            .persist(&key)
+            .await
+            .context("PERSIST failed")?;
+
+        if removed {
+            tracing::debug!(
+                session_id = %session_id,
+                "TTL cleared from session key"
+            );
+        }
 
         Ok(())
     }
@@ -676,6 +700,67 @@ impl SessionRegistry {
         Ok(plaintext)
     }
 
+    /// Session ids whose status is `incomplete` and whose last update is older
+    /// than `cutoff` — the retention sweep's input.
+    ///
+    /// `Incomplete` has no index set (`SessionStatus::index_set` returns `None`),
+    /// so this scans `session:*` rather than reading a set. Sessions marked
+    /// incomplete by earlier versions were never added to any index, and a SCAN
+    /// finds those too; the cost is bounded by session count and the sweep runs
+    /// once per startup.
+    pub async fn list_incomplete_before(
+        &mut self,
+        cutoff: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut cursor: u64 = 0;
+        let mut expired: Vec<String> = Vec::new();
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("session:*")
+                .arg("COUNT")
+                .arg(100u64)
+                .query_async(&mut self.conn)
+                .await
+                .context("SCAN session keys failed")?;
+
+            for key in keys {
+                let fields: HashMap<String, String> = self.conn
+                    .hgetall(&key)
+                    .await
+                    .context("HGETALL session for retention sweep failed")?;
+
+                if fields.get("status").map(String::as_str) != Some("incomplete") {
+                    continue;
+                }
+
+                // A record with an unparseable or absent timestamp is left alone —
+                // retention must never delete a session it cannot date.
+                let Some(updated_at) = fields
+                    .get("updated_at")
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|t| t.with_timezone(&Utc))
+                else {
+                    tracing::warn!(key = %key, "Retention sweep: skipping record with no readable updated_at");
+                    continue;
+                };
+
+                if updated_at >= cutoff {
+                    continue;
+                }
+
+                if let Some(id) = fields.get("session_id").filter(|s| !s.is_empty()) {
+                    expired.push(id.clone());
+                }
+            }
+
+            cursor = next_cursor;
+            if cursor == 0 { break; }
+        }
+        Ok(expired)
+    }
+
     /// List all annotators with their live claim counts.
     /// Live count is derived by scanning `claim:*` keys — bounded and acceptable
     /// since annotator registry size is small relative to session count.
@@ -865,7 +950,9 @@ mod claim_match_tests {
     }
 }
 
-// These tests require a running Redis instance.
+// These tests require a running Redis instance. They operate on DB 15, never the
+// live registry on DB 0 — see TEST_REDIS_URL.
+//
 // Run with: cargo test -p ma-core -- --test-threads=1
 //
 // --test-threads=1 prevents parallel tests from interfering with each other
@@ -876,7 +963,11 @@ mod tests {
     use super::*;
     use schema::SessionMode;
 
-    const TEST_REDIS_URL: &str = "redis://127.0.0.1:6379";
+    /// DB 15, never DB 0. DB 0 is the live session registry: a test that panics
+    /// before its `cleanup()` leaves an orphan record and index-set membership
+    /// behind in real corpus data. Matches `REDIS_TEST_DB` in
+    /// `integration-tests/harness.py`.
+    const TEST_REDIS_URL: &str = "redis://127.0.0.1:6379/15";
 
     /// Build a minimal SessionRecord for testing.
     fn test_record(session_id: &str) -> SessionRecord {
@@ -1007,7 +1098,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_annotating_status_uses_index_and_ttl() {
+    async fn test_annotating_status_uses_index_and_carries_no_ttl() {
         let mut registry = SessionRegistry::connect(TEST_REDIS_URL)
             .await
             .expect("Redis must be running");
@@ -1035,15 +1126,107 @@ mod tests {
             .unwrap();
         assert!(in_annotating, "Should be in sessions:annotating");
 
-        // TTL should be set (~7 days).
+        // No TTL. A session under annotation is an unfinished recording, and the
+        // record is the only index from its id to its memory_path — expiring it
+        // strands the frames on disk with nothing pointing at them. TTL -1 means
+        // the key exists with no expiry.
         let ttl: i64 = redis::cmd("TTL")
             .arg(session_key(&id))
             .query_async(&mut registry.conn)
             .await
             .unwrap();
-        assert!(ttl > 0, "Annotating session should have a TTL set, got {ttl}");
+        assert_eq!(ttl, -1, "Annotating session must carry no TTL, got {ttl}");
 
         cleanup(&mut registry, &id).await;
+    }
+
+    /// `update_status` must *clear* an expiry a key already carries, not merely
+    /// skip setting a new one. Records written by versions before 0.3.2 carry
+    /// TTLs from the old table, and nothing else would ever remove them.
+    #[tokio::test]
+    async fn test_update_status_clears_a_pre_existing_ttl() {
+        let mut registry = SessionRegistry::connect(TEST_REDIS_URL)
+            .await
+            .expect("Redis must be running");
+
+        let id = format!("test-{}", uuid::Uuid::new_v4());
+        let record = test_record(&id);
+
+        registry.register(&record).await.expect("register failed");
+        registry.set_ttl(&id, 3600).await.expect("set_ttl failed");
+
+        let before: i64 = redis::cmd("TTL")
+            .arg(session_key(&id))
+            .query_async(&mut registry.conn)
+            .await
+            .unwrap();
+        assert!(before > 0, "precondition: key should carry a TTL, got {before}");
+
+        registry
+            .update_status(&id, SessionStatus::PendingAnnotation)
+            .await
+            .expect("update_status failed");
+
+        let after: i64 = redis::cmd("TTL")
+            .arg(session_key(&id))
+            .query_async(&mut registry.conn)
+            .await
+            .unwrap();
+        assert_eq!(after, -1, "update_status should have persisted the key, got {after}");
+
+        cleanup(&mut registry, &id).await;
+        let _ = registry.conn.srem::<_, _, ()>("sessions:pending", &id).await;
+    }
+
+    /// The retention sweep deletes records, stored objects and directories
+    /// together, so its selection must be exact: only `incomplete`, only past the
+    /// cutoff, and never a record whose age cannot be read.
+    #[tokio::test]
+    async fn test_list_incomplete_before_selects_only_dated_expired_incompletes() {
+        let mut registry = SessionRegistry::connect(TEST_REDIS_URL)
+            .await
+            .expect("Redis must be running");
+
+        let cutoff = Utc::now() - chrono::Duration::days(365);
+        let stale = (cutoff - chrono::Duration::days(1)).to_rfc3339();
+        let fresh = Utc::now().to_rfc3339();
+
+        // status, updated_at, expected in the sweep
+        let cases: [(&str, &str, bool); 4] = [
+            ("incomplete", stale.as_str(), true),
+            ("incomplete", fresh.as_str(), false),
+            ("complete", stale.as_str(), false),
+            ("incomplete", "not-a-timestamp", false),
+        ];
+
+        let mut ids = Vec::new();
+        for (status, updated_at, _) in cases {
+            let id = format!("test-{}", uuid::Uuid::new_v4());
+            let record = test_record(&id);
+            registry.register(&record).await.expect("register failed");
+            let _: () = registry.conn
+                .hset_multiple(session_key(&id), &[("status", status), ("updated_at", updated_at)])
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+
+        let expired = registry
+            .list_incomplete_before(cutoff)
+            .await
+            .expect("list_incomplete_before failed");
+
+        for (id, (status, updated_at, should_expire)) in ids.iter().zip(cases) {
+            assert_eq!(
+                expired.contains(id),
+                should_expire,
+                "status={status} updated_at={updated_at} was selected incorrectly"
+            );
+        }
+
+        for id in &ids {
+            cleanup(&mut registry, id).await;
+        }
     }
 
     #[tokio::test]

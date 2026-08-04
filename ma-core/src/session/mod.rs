@@ -104,22 +104,71 @@ pub fn mark_incomplete(memory_dir: &Path) -> anyhow::Result<PathBuf> {
 /// `storage_path/{memory_name}` (the record's `memory_path`), which is distinct
 /// from the `storage_path/{session_id}` proxy tree handled by `LocalBackend`.
 ///
+/// Each directory is removed only when its `metadata.json` carries `session_id`.
+/// A `memory_path` does not uniquely identify a session: when a scrapped take is
+/// re-recorded under the same `memory_name`, the replacement occupies the same
+/// path while the abandoned record keeps pointing at it, so purging by path alone
+/// deletes the successful recording instead of the discarded one. A directory
+/// whose metadata is missing, unreadable, or names a different session is left in
+/// place and reported — retention and deletion must not destroy a recording they
+/// cannot prove they own.
+///
 /// Returns `true` if at least one directory was removed. A missing directory is
 /// not an error.
-pub fn purge_memory_dir(memory_path: &str) -> anyhow::Result<bool> {
-    let mut removed = false;
-    let primary = Path::new(memory_path);
-    if primary.exists() {
-        std::fs::remove_dir_all(primary)
-            .with_context(|| format!("Failed to remove memory directory: {}", primary.display()))?;
-        removed = true;
-    }
+/// Read just the `session_id` out of a directory's metadata.json.
+///
+/// Parsed as untyped JSON rather than through `metadata::read` so that ownership
+/// stays establishable for sessions written before a field was added to
+/// `SessionMetadata`. A strict parse would fail on those and make deletion refuse
+/// to remove directories it does in fact own.
+fn read_owner_session_id(memory_dir: &Path) -> anyhow::Result<String> {
+    let path = memory_dir.join("metadata.json");
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read metadata.json: {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("Failed to parse metadata.json: {}", path.display()))?;
+    value
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .with_context(|| format!("metadata.json has no session_id: {}", path.display()))
+}
 
-    let incomplete = PathBuf::from(format!("{memory_path} (incomplete)"));
-    if incomplete.exists() {
-        std::fs::remove_dir_all(&incomplete)
-            .with_context(|| format!("Failed to remove memory directory: {}", incomplete.display()))?;
-        removed = true;
+pub fn purge_memory_dir(memory_path: &str, session_id: &str) -> anyhow::Result<bool> {
+    let mut removed = false;
+
+    for candidate in [
+        PathBuf::from(memory_path),
+        PathBuf::from(format!("{memory_path} (incomplete)")),
+    ] {
+        if !candidate.exists() {
+            continue;
+        }
+
+        match read_owner_session_id(&candidate) {
+            Ok(owner) if owner == session_id => {
+                std::fs::remove_dir_all(&candidate).with_context(|| {
+                    format!("Failed to remove memory directory: {}", candidate.display())
+                })?;
+                removed = true;
+            }
+            Ok(owner) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    owner_session_id = %owner,
+                    path = %candidate.display(),
+                    "Refusing to purge a directory owned by another session"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    path = %candidate.display(),
+                    "Refusing to purge a directory whose owner could not be established: {e}"
+                );
+            }
+        }
     }
 
     Ok(removed)
@@ -176,24 +225,75 @@ fn build_initial_metadata(record: &SessionRecord) -> SessionMetadata {
 mod purge_tests {
     use super::purge_memory_dir;
 
+    /// Minimal metadata.json carrying just the ownership field purge checks.
+    fn write_meta(dir: &std::path::Path, session_id: &str) {
+        std::fs::write(
+            dir.join("metadata.json"),
+            serde_json::json!({
+                "memory_name": "my-memory",
+                "session_id": session_id,
+                "mode": "manual",
+                "status": "complete",
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn purges_primary_and_incomplete_siblings() {
+        let owner = uuid::Uuid::new_v4().to_string();
         let base = std::env::temp_dir().join(format!("ma-mem-{}", uuid::Uuid::new_v4()));
         let primary = base.join("my-memory");
         let incomplete = base.join("my-memory (incomplete)");
         std::fs::create_dir_all(primary.join("vision/frames")).unwrap();
-        std::fs::write(primary.join("metadata.json"), b"{}").unwrap();
+        write_meta(&primary, &owner);
         std::fs::create_dir_all(&incomplete).unwrap();
-        std::fs::write(incomplete.join("metadata.json"), b"{}").unwrap();
+        write_meta(&incomplete, &owner);
 
-        let removed = purge_memory_dir(&primary.to_string_lossy()).unwrap();
+        let removed = purge_memory_dir(&primary.to_string_lossy(), &owner).unwrap();
         assert!(removed, "should report a directory was removed");
         assert!(!primary.exists(), "primary memory dir should be gone");
         assert!(!incomplete.exists(), "(incomplete) sibling should be gone");
 
         // No-op when nothing is present.
-        let removed_again = purge_memory_dir(&primary.to_string_lossy()).unwrap();
+        let removed_again = purge_memory_dir(&primary.to_string_lossy(), &owner).unwrap();
         assert!(!removed_again);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A re-recorded take occupies the same memory_path as the abandoned session
+    /// that preceded it. Purging the old session must not delete the new one.
+    #[test]
+    fn refuses_to_purge_a_directory_owned_by_another_session() {
+        let abandoned = uuid::Uuid::new_v4().to_string();
+        let replacement = uuid::Uuid::new_v4().to_string();
+        let base = std::env::temp_dir().join(format!("ma-mem-{}", uuid::Uuid::new_v4()));
+        let primary = base.join("my-memory");
+        std::fs::create_dir_all(&primary).unwrap();
+        write_meta(&primary, &replacement);
+
+        let removed = purge_memory_dir(&primary.to_string_lossy(), &abandoned).unwrap();
+        assert!(!removed, "must not report a removal it refused");
+        assert!(primary.exists(), "the replacement recording must survive");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Ownership cannot be established without readable metadata, so the
+    /// directory is left in place rather than deleted on assumption.
+    #[test]
+    fn refuses_to_purge_a_directory_with_unreadable_metadata() {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let base = std::env::temp_dir().join(format!("ma-mem-{}", uuid::Uuid::new_v4()));
+        let primary = base.join("my-memory");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::write(primary.join("metadata.json"), b"not json").unwrap();
+
+        let removed = purge_memory_dir(&primary.to_string_lossy(), &owner).unwrap();
+        assert!(!removed);
+        assert!(primary.exists());
 
         let _ = std::fs::remove_dir_all(&base);
     }
