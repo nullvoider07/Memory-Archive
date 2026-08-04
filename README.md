@@ -6,11 +6,14 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.3.2  
+**Version:** 0.3.3  
 **Last Updated:** August 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.3.2** — session registry records no longer expire, and deletion can no longer remove a recording it does not own:
+> **✨ What's new in 0.3.3** — the annotation TUI no longer stacks a new image viewer on every open:
+> - **Opening a step's image replaces the previous viewer instead of stacking another one.** `ImageReview._open_image` spawned the viewer with `subprocess.Popen` and never kept the handle, so nothing tracked or closed it and every Enter or click launched another fullscreen `feh`. It surfaced as the image opening "in a new tab", and as Escape appearing not to close it — feh binds Escape to quit but quits only the **focused** instance, so closing the top of a stack of identical fullscreen windows leaves an identical image on screen. The extra window was never useful: all three frames (`before`, `at`, `after`) are already passed to one instance with `--start-at`. The viewer is also closed when the TUI unmounts, so it can no longer outlive the session, and the tracked handle reaps the child instead of leaving a zombie. The macOS and Windows launchers stay untracked on purpose — `open` and `os.startfile` hand off to a separate application and exit, so their handle is not the window.
+>
+> Earlier in 0.3.2 — session registry records no longer expire, and deletion can no longer remove a recording it does not own:
 > - **Session registry records no longer expire.** Records carried a Redis TTL — 7 days while pending or annotating, 30 days when incomplete, 90 days once complete. Expiry could never reclaim a session's bytes, because those are the frames on disk and not the 1.8 KB record, so it only dropped the pointer and stranded the payload: `annotate`, `compile` and `status` all resolve a session through that record, and nothing can rebuild one from disk. A 101-session corpus lost 21 records this way — every session from its first fortnight, capture data intact, all of it unreachable. `ttl_seconds()` now returns `None` for every status, `FinalizeMemory` no longer applies its own hardcoded 90 days, and `update_status` *clears* a stale TTL rather than only ever setting one, which is what makes the fix retroactive for records written by earlier versions.
 > - **Deletion no longer purges a directory it does not own.** `memory_path` does not uniquely identify a session: when a scrapped take is re-recorded under the same `memory_name`, the replacement occupies the same path while the abandoned record keeps pointing at it — so purging by path took the *successful* recording. Two live examples were found in the affected corpus, each aimed at a complete recording. `purge_memory_dir` now requires the directory's `metadata.json` to name the session being deleted, and leaves anything it cannot prove it owns in place.
 > - **Interrupted captures are bounded by a retention sweep, not a TTL.** `Incomplete` is the one status with a retention limit, at one year. Key expiry runs no application code, so a TTL could only ever drop the record and orphan the frames; the startup sweep removes the record, the stored objects and the directory in one operation, and skips any record it cannot date.
@@ -965,7 +968,7 @@ Check `ma-core` connectivity. Sends a `Ping` IPC message and prints the `ma-core
 
 ```bash
 memory-archive ping
-# → ma-core v0.3.2 — OK
+# → ma-core v0.3.3 — OK
 ```
 
 ---

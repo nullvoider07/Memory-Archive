@@ -167,6 +167,7 @@ class ImageReview(Widget, can_focus=True):
         self._path: Optional[Path] = None
         self._frame_paths: list[Path] = []
         self._fetching: bool = False
+        self._viewer: Optional[subprocess.Popen] = None
 
     def compose(self) -> ComposeResult:
         yield Label("IMAGE", id="img-title-bar")
@@ -353,16 +354,53 @@ class ImageReview(Widget, can_focus=True):
             event.stop()
             self._open_image()
 
+    def on_unmount(self) -> None:
+        self._close_viewer()
+
+    def _close_viewer(self) -> None:
+        """
+        Close the viewer this pane last opened, if it is still running.
+
+        Opening must replace the previous window rather than stack another one
+        over it. feh binds Escape to quit, but quits only the focused instance,
+        so a stack of identical fullscreen windows reads as Escape doing nothing
+        — the annotator closes the top one and an identical image is still there.
+
+        poll()/wait() are also what reap the child: an exited viewer whose handle
+        was never held stays a zombie until the next spawn.
+        """
+        proc = self._viewer
+        self._viewer = None
+        if proc is None or proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+
     def _open_image(self) -> None:
         if not self._frame_paths:
             return
         target = self._path or self._frame_paths[0]
         if _HAS_FEH:
+            self._close_viewer()
             cmd = ["feh", "--fullscreen", "--auto-zoom"]
             cmd += [str(p.resolve()) for p in self._frame_paths]
             if self._path:
                 cmd += ["--start-at", str(self._path.resolve())]
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._viewer = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        # The macOS and Windows launchers are deliberately not tracked. Both hand
+        # the file to a separate application and exit immediately, so the handle
+        # refers to the launcher, not the window — terminating it would close
+        # nothing. Preview and the Windows shell handler reuse their own window
+        # for a repeated open, so neither stacks the way feh does.
         elif _HAS_OPEN:
             subprocess.Popen(
                 ["open", str(target.resolve())],

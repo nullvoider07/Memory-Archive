@@ -3,6 +3,41 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.3] — 2026-08-04
+
+The annotation TUI stacked a new image viewer on every open.
+
+### Fixed
+
+- **Opening a step's image now replaces the previous viewer instead of stacking
+  another one.** `ImageReview._open_image` spawned the viewer with
+  `subprocess.Popen` and never kept the handle, so nothing tracked or closed it.
+  Every Enter or click launched *another* fullscreen `feh`. The visible symptoms
+  were the image appearing to open "in a new tab", and Escape appearing not to
+  close it — feh binds Escape to quit but quits only the **focused** instance, so
+  closing the top of a stack of identical fullscreen windows leaves an identical
+  image on screen. That is deterministic in how many times the step was opened,
+  not intermittent. The second window was never useful: the command already
+  passes all three frames (`before`, `at`, `after`) with `--start-at`, so one
+  instance holds the whole step.
+- **The viewer no longer outlives the TUI.** `ImageReview` had no `on_unmount`,
+  so a viewer left open when the annotator quit kept running unattended.
+- **Exited viewers are reaped.** Without a retained handle the child stayed a
+  zombie until the next spawn happened to clear it. `poll()`/`wait()` on the
+  tracked process now reap it directly.
+
+The macOS and Windows launchers are deliberately left untracked: `open` and
+`os.startfile` hand the file to a separate application and exit immediately, so
+the handle refers to the launcher rather than the window, and both Preview and
+the Windows shell handler reuse their own window on a repeated open.
+
+### Notes
+
+- Running `pytest ma-app/tests` without installing the package first tests the
+  *installed* `ma_app`, not the working tree. CI installs `./ma-app` before
+  running them, so it is unaffected; locally, prefix with `PYTHONPATH=ma-app` or
+  reinstall before trusting a pass.
+
 ## [0.3.2] — 2026-08-04
 
 Session registry records no longer expire, and deletion can no longer remove a
