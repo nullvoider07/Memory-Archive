@@ -1,5 +1,12 @@
 // /Memory-Archive/ma-core/src/main.rs
 
+// Every `collapsible_if` site in this crate is an `if cond { if let ... }`.
+// Collapsing those requires let-chains, stabilised in Rust 1.88, while the
+// documented build requirement is Rust 1.85 — the minimum edition 2024 itself
+// needs. Raising the toolchain floor for a formatting preference is the wrong
+// trade, so the nested form stays.
+#![allow(clippy::collapsible_if, clippy::collapsible_else_if)]
+
 mod annotator_management;
 mod capture;
 mod config;
@@ -472,7 +479,7 @@ async fn main() -> anyhow::Result<()> {
         let meta = if is_cloud_primary_with_kafka {
             let cloud_path = format!("{}/metadata.json", record.memory_name);
             match session_storage.get(&session_id, &cloud_path).await
-                .and_then(|b| session::metadata::from_bytes(&b).map_err(Into::into))
+                .and_then(|b| session::metadata::from_bytes(&b))
             {
                 Ok(m) => m,
                 Err(_) => continue,
@@ -590,7 +597,7 @@ async fn main() -> anyhow::Result<()> {
                         if cfg_signal.storage_mode == "cloud_primary" {
                             let cloud_path = format!("{}/metadata.json", record.memory_name);
                             let updated = session_storage.get(session_id, &cloud_path).await
-                                .and_then(|b| session::metadata::from_bytes(&b).map_err(Into::into))
+                                .and_then(|b| session::metadata::from_bytes(&b))
                                 .and_then(|mut meta| {
                                     meta.in_progress = Some("interrupted".to_string());
                                     serde_json::to_vec_pretty(&meta).map_err(Into::into)
@@ -668,16 +675,17 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Kafka consumer spawned — broker: {}", cfg.kafka_broker);
     }
 
-    let ipc_handle = tokio::spawn(ipc::serve(
-        socket_path,
-        registry.clone(),
-        cfg.clone(),
-        done_handles.clone(),
-        push_handles.clone(),
-        kafka_session_map.clone(),
-        storage_router.clone(),
-        reasoning_maps.clone(),
-    ));
+    let ipc_services = ipc::IpcServices {
+        registry: registry.clone(),
+        config: cfg.clone(),
+        done_handles: done_handles.clone(),
+        push_handles: push_handles.clone(),
+        kafka_session_map: kafka_session_map.clone(),
+        storage_router: storage_router.clone(),
+        reasoning_maps: reasoning_maps.clone(),
+    };
+
+    let ipc_handle = tokio::spawn(ipc::serve(socket_path, ipc_services.clone()));
 
     if let Some(port) = cfg.ipc_port {
         let admin_token = std::env::var("MA_IPC_TOKEN").unwrap_or_default();
@@ -698,17 +706,13 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-        let bind_addr = cfg.ipc_bind_addr.clone();
-        let token     = admin_token;
-        let reg       = registry.clone();
-        let config    = cfg.clone();
-        let dh        = done_handles.clone();
-        let ph        = push_handles.clone();
-        let ksm       = kafka_session_map.clone();
-        let sr        = storage_router.clone();
-        let rm_tcp    = reasoning_maps.clone();
+        let bind_addr    = cfg.ipc_bind_addr.clone();
+        let token        = admin_token;
+        let tcp_services = ipc_services.clone();
         tokio::spawn(async move {
-            if let Err(e) = ipc::serve_tcp(bind_addr, port, token, reg, config, dh, ph, ksm, sr, tls_acceptor, rm_tcp).await {
+            if let Err(e) =
+                ipc::serve_tcp(bind_addr, port, token, tcp_services, tls_acceptor).await
+            {
                 tracing::error!("IPC TCP server error: {e}");
             }
         });

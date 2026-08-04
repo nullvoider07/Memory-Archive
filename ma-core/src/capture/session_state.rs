@@ -69,7 +69,7 @@ impl CaptureState {
         for (provider, (pin, pout)) in provider_tokens {
             let entry = self.metadata.token_costs_by_provider
                 .entry(provider)
-                .or_insert_with(crate::session::metadata::ProviderTokenCounts::default);
+                .or_default();
             entry.input_tokens += pin;
             entry.output_tokens += pout;
         }

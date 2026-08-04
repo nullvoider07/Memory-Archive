@@ -77,6 +77,13 @@ mod base64_bytes_opt {
 }
 
 /// All messages that ma-app (Python) can send to ma-core (Rust).
+// `RegisterSession` carries seventeen strings and sets the enum's size at ~440
+// bytes for all sixty variants. Boxing it means turning the struct variant into
+// a newtype wrapping a separate struct, which changes the shape serde derives at
+// the protocol boundary with ma-app — for a value built once per request, not in
+// any loop, against a 4 MB message limit. The stack cost is not worth touching
+// the wire format for.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InboundMessage {

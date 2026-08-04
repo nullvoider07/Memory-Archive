@@ -124,7 +124,7 @@ impl StorageBackend for LocalBackend {
                 let path = entry.path();
                 if path.is_dir() {
                     stack.push(path);
-                } else if let Ok(rel) = path.strip_prefix(&self.storage_path.join(session_id)) {
+                } else if let Ok(rel) = path.strip_prefix(self.storage_path.join(session_id)) {
                     results.push(rel.to_string_lossy().to_string());
                 }
             }
@@ -762,7 +762,7 @@ impl GcpBackend {
 
         control
             .get_bucket()
-            .set_name(&format!("projects/_/buckets/{bucket}"))
+            .set_name(format!("projects/_/buckets/{bucket}"))
             .send()
             .await
             .with_context(|| {
@@ -837,7 +837,7 @@ impl StorageBackend for GcpBackend {
         loop {
             let mut req = self.control
                 .list_objects()
-                .set_parent(&self.bucket_resource())
+                .set_parent(self.bucket_resource())
                 .set_prefix(&full_prefix);
 
             if let Some(ref token) = page_token {
@@ -876,7 +876,7 @@ impl StorageBackend for GcpBackend {
 
         self.control
             .delete_object()
-            .set_bucket(&self.bucket_resource())
+            .set_bucket(self.bucket_resource())
             .set_object(&name)
             .send()
             .await

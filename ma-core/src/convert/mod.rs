@@ -375,6 +375,10 @@ mod tests {
     use super::*;
     use ma_proto::control_center::CommandEvent;
 
+    // A test fixture builder, called 27 times below with positional literals.
+    // A params struct here would make every call site longer without making any
+    // of them safer — the arguments are visible at each call, in one file.
+    #[allow(clippy::too_many_arguments)]
     fn event(
         action_type: &str,
         action_subtype: &str,

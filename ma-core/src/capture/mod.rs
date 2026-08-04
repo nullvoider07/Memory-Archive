@@ -27,13 +27,20 @@ use crate::session::metadata::StepEntry;
 use crate::storage::StorageBackend;
 use crate::vision::VisionPipeline;
 
-pub type DoneHandleMap = Arc<Mutex<HashMap<String, (oneshot::Sender<()>, oneshot::Receiver<u32>)>>>;
+/// Signal to stop capture, paired with the final step count reported back.
+pub type DoneHandle = (oneshot::Sender<()>, oneshot::Receiver<u32>);
+pub type DoneHandleMap = Arc<Mutex<HashMap<String, DoneHandle>>>;
 pub type PushHandleMap = Arc<Mutex<HashMap<String, mpsc::Sender<OutboundMessage>>>>;
 pub type ReasoningMapsRef = Arc<ReasoningMaps>;
 
+/// Input and output token counts for one reasoning entry.
+pub type TokenCounts = (u64, u64);
+/// Token counts keyed by model provider, for one session.
+pub type ProviderTokens = HashMap<String, TokenCounts>;
+
 pub struct ReasoningMaps {
-    tokens: tokio::sync::Mutex<HashMap<String, (u64, u64)>>,
-    provider_tokens: tokio::sync::Mutex<HashMap<String, HashMap<String, (u64, u64)>>>,
+    tokens: tokio::sync::Mutex<HashMap<String, TokenCounts>>,
+    provider_tokens: tokio::sync::Mutex<HashMap<String, ProviderTokens>>,
     write_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     degraded: tokio::sync::Mutex<std::collections::HashSet<String>>,
 }
@@ -88,7 +95,7 @@ impl ReasoningMaps {
     pub async fn drain_provider_tokens(
         &self,
         session_id: &str,
-    ) -> HashMap<String, (u64, u64)> {
+    ) -> ProviderTokens {
         let mut outer = self.provider_tokens.lock().await;
         outer.remove(session_id).unwrap_or_default()
     }
@@ -126,8 +133,11 @@ pub struct EventWithPosition {
     pub kafka_offset: Option<i64>,
 }
 
+/// The gRPC variant is boxed because `WatchStream` is ~464 bytes against the
+/// receiver's 8, and an unboxed enum costs the larger of the two everywhere it
+/// is moved regardless of which variant it holds.
 pub enum EventSource {
-    Grpc(WatchStream),
+    Grpc(Box<WatchStream>),
     Kafka(mpsc::Receiver<crate::kafka::KafkaEvent>),
 }
 
@@ -172,17 +182,35 @@ fn signal_ready(slot: &mut Option<WatchReady>, outcome: Result<(), String>) {
     }
 }
 
-pub async fn run_watch_loop(
-    session_id: String,
-    mut registry: SessionRegistry,
-    config: Config,
-    push_tx: mpsc::Sender<OutboundMessage>,
-    done_handles: DoneHandleMap,
-    kafka_session_map: KafkaSessionMap,
-    storage: Arc<dyn StorageBackend>,
-    reasoning_maps: ReasoningMapsRef,
-    ready_tx: Option<WatchReady>,
-) {
+/// Everything one capture session's watch loop needs for its whole lifetime.
+///
+/// Unlike `IpcServices` this is per-session, not shared: `storage` is the
+/// backend already resolved for this session's record, and `push_tx` is that
+/// one connection's outbound channel.
+pub struct WatchLoopArgs {
+    pub session_id: String,
+    pub registry: SessionRegistry,
+    pub config: Config,
+    pub push_tx: mpsc::Sender<OutboundMessage>,
+    pub done_handles: DoneHandleMap,
+    pub kafka_session_map: KafkaSessionMap,
+    pub storage: Arc<dyn StorageBackend>,
+    pub reasoning_maps: ReasoningMapsRef,
+    pub ready_tx: Option<WatchReady>,
+}
+
+pub async fn run_watch_loop(args: WatchLoopArgs) {
+    let WatchLoopArgs {
+        session_id,
+        mut registry,
+        config,
+        push_tx,
+        done_handles,
+        kafka_session_map,
+        storage,
+        reasoning_maps,
+        ready_tx,
+    } = args;
     let mut ready_tx = ready_tx;
 
     let record = match registry.get(&session_id).await {
@@ -314,7 +342,7 @@ pub async fn run_watch_loop(
                 );
                 state.set_actuation_transport(s.transport().as_str());
                 state.set_actuation_server_version(s.server_version());
-                EventSource::Grpc(s)
+                EventSource::Grpc(Box::new(s))
             }
             Err(e) => {
                 let reason = format!("{e:#}");

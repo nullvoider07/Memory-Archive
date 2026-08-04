@@ -20,17 +20,28 @@ use crate::registry::SessionRegistry;
 use crate::storage::StorageRouter;
 use messages::{FileEntry, InboundMessage, OutboundMessage, QueueItem};
 
+/// The long-lived services every IPC handler needs.
+///
+/// These seven were previously threaded individually through the whole chain —
+/// `serve` to `handle_connection` to `handle_connection_inner` to
+/// `handle_message`, and the same again on the TCP side — which put every
+/// signature past ten parameters and made a transposed argument of the same type
+/// a silent bug. Cloning is cheap: each field is a handle (`Arc`, a channel map,
+/// or a pooled Redis connection), so a per-connection clone shares the
+/// underlying state rather than duplicating it.
+#[derive(Clone)]
+pub struct IpcServices {
+    pub registry: SessionRegistry,
+    pub config: Config,
+    pub done_handles: crate::capture::DoneHandleMap,
+    pub push_handles: crate::capture::PushHandleMap,
+    pub kafka_session_map: crate::kafka::KafkaSessionMap,
+    pub storage_router: std::sync::Arc<StorageRouter>,
+    pub reasoning_maps: crate::capture::ReasoningMapsRef,
+}
+
 #[cfg(unix)]
-pub async fn serve(
-    socket_path: PathBuf,
-    registry: SessionRegistry,
-    config: Config,
-    done_handles: crate::capture::DoneHandleMap,
-    push_handles: crate::capture::PushHandleMap,
-    kafka_session_map: crate::kafka::KafkaSessionMap,
-    storage_router: std::sync::Arc<StorageRouter>,
-    reasoning_maps: crate::capture::ReasoningMapsRef,
-) -> anyhow::Result<()> {
+pub async fn serve(socket_path: PathBuf, services: IpcServices) -> anyhow::Result<()> {
     if socket_path.exists() {
         std::fs::remove_file(&socket_path).with_context(|| {
             format!("Failed to remove stale socket: {}", socket_path.display())
@@ -72,15 +83,9 @@ pub async fn serve(
         match listener.accept().await {
             Ok((stream, _)) => {
                 tracing::debug!("IPC: new connection");
-                let reg = registry.clone();
-                let cfg = config.clone();
-                let dh = done_handles.clone();
-                let ph = push_handles.clone();
-                let ksm = kafka_session_map.clone();
-                let sr = storage_router.clone();
-                let rm = reasoning_maps.clone();
+                let conn_services = services.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, reg, cfg, dh, ph, ksm, sr, rm).await {
+                    if let Err(e) = handle_connection(stream, conn_services).await {
                         tracing::warn!("IPC connection error: {e}");
                     }
                 });
@@ -91,47 +96,23 @@ pub async fn serve(
 }
 
 #[cfg(not(unix))]
-pub async fn serve(
-    _socket_path: PathBuf,
-    _registry: SessionRegistry,
-    _config: Config,
-    _done_handles: crate::capture::DoneHandleMap,
-    _push_handles: crate::capture::PushHandleMap,
-    _kafka_session_map: crate::kafka::KafkaSessionMap,
-    _storage_router: std::sync::Arc<StorageRouter>,
-    _reasoning_maps: crate::capture::ReasoningMapsRef,
-) -> anyhow::Result<()> {
+pub async fn serve(_socket_path: PathBuf, _services: IpcServices) -> anyhow::Result<()> {
     tracing::info!("Unix socket IPC not available on this platform — set ipc_port in config to use TCP mode");
     std::future::pending::<()>().await;
     Ok(())
 }
 
 #[cfg(unix)]
-async fn handle_connection(
-    stream: UnixStream,
-    registry: SessionRegistry,
-    config: Config,
-    done_handles: crate::capture::DoneHandleMap,
-    push_handles: crate::capture::PushHandleMap,
-    kafka_session_map: crate::kafka::KafkaSessionMap,
-    storage_router: std::sync::Arc<StorageRouter>,
-    reasoning_maps: crate::capture::ReasoningMapsRef,
-) -> anyhow::Result<()> {
+async fn handle_connection(stream: UnixStream, services: IpcServices) -> anyhow::Result<()> {
     let (reader, writer) = stream.into_split();
     let lines = BufReader::with_capacity(64 * 1024, reader).lines();
-    handle_connection_inner(lines, writer, registry, config, done_handles, push_handles, kafka_session_map, storage_router, reasoning_maps).await
+    handle_connection_inner(lines, writer, services).await
 }
 
 async fn handle_connection_inner<R, W>(
     mut lines: tokio::io::Lines<BufReader<R>>,
     mut writer: W,
-    registry: SessionRegistry,
-    config: Config,
-    done_handles: crate::capture::DoneHandleMap,
-    push_handles: crate::capture::PushHandleMap,
-    kafka_session_map: crate::kafka::KafkaSessionMap,
-    storage_router: std::sync::Arc<StorageRouter>,
-    reasoning_maps: crate::capture::ReasoningMapsRef,
+    services: IpcServices,
 ) -> anyhow::Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -157,18 +138,7 @@ where
 
                         let response = match serde_json::from_str::<InboundMessage>(&line) {
                             Ok(msg) => {
-                                handle_message(
-                                    msg,
-                                    registry.clone(),
-                                    config.clone(),
-                                    push_tx.clone(),
-                                    done_handles.clone(),
-                                    push_handles.clone(),
-                                    kafka_session_map.clone(),
-                                    storage_router.clone(),
-                                    reasoning_maps.clone(),
-                                )
-                                .await
+                                handle_message(msg, services.clone(), push_tx.clone()).await
                             }
                             Err(e) => OutboundMessage::Error {
                                 code: "PARSE_ERROR".to_string(),
@@ -340,15 +310,19 @@ fn enforce_metadata_annotator_fields(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
 
 async fn handle_message(
     msg: InboundMessage,
-    mut registry: SessionRegistry,
-    config: Config,
+    services: IpcServices,
     push_tx: mpsc::Sender<OutboundMessage>,
-    done_handles: crate::capture::DoneHandleMap,
-    push_handles: crate::capture::PushHandleMap,
-    kafka_session_map: crate::kafka::KafkaSessionMap,
-    storage_router: std::sync::Arc<StorageRouter>,
-    reasoning_maps: crate::capture::ReasoningMapsRef,
 ) -> OutboundMessage {
+    let IpcServices {
+        mut registry,
+        config,
+        done_handles,
+        push_handles,
+        kafka_session_map,
+        storage_router,
+        reasoning_maps,
+    } = services;
+
     match msg {
         InboundMessage::Ping => {
             tracing::debug!("IPC: Ping");
@@ -751,15 +725,17 @@ async fn handle_message(
                     let mut ready_registry = registry.clone();
 
                     tokio::spawn(crate::capture::run_watch_loop(
-                        session_id.clone(),
-                        registry,
-                        config,
-                        push_tx,
-                        done_handles,
-                        kafka_session_map,
-                        storage,
-                        reasoning_maps.clone(),
-                        Some(ready_tx),
+                        crate::capture::WatchLoopArgs {
+                            session_id: session_id.clone(),
+                            registry,
+                            config,
+                            push_tx,
+                            done_handles,
+                            kafka_session_map,
+                            storage,
+                            reasoning_maps: reasoning_maps.clone(),
+                            ready_tx: Some(ready_tx),
+                        },
                     ));
 
                     match ready_rx.await {
@@ -989,7 +965,7 @@ async fn handle_message(
                             if config.storage_mode == "cloud_primary" {
                                 let cloud_path = format!("{}/metadata.json", record.memory_name);
                                 match storage.get(&session_id, &cloud_path).await
-                                    .and_then(|b| crate::session::metadata::from_bytes(&b).map_err(Into::into))
+                                    .and_then(|b| crate::session::metadata::from_bytes(&b))
                                 {
                                     Ok(mut meta) => {
                                         meta.status = "complete".to_string();
@@ -1468,17 +1444,19 @@ async fn handle_message(
             let provider_name = if provider.is_empty() { None } else { Some(provider.clone()) };
             let entry = crate::session::reasoning::build_automated_entry(
                 &step,
-                reasoning,
-                source,
-                provider_name,
-                Some(model_id),
-                Some(api_version),
-                Some(input_tokens),
-                Some(output_tokens),
-                Some(latency_ms),
-                action_intent,
-                confidence,
-                keyboard_visual_annotation,
+                crate::session::reasoning::AutomatedReasoning {
+                    reasoning,
+                    source,
+                    provider: provider_name,
+                    model_id: Some(model_id),
+                    api_version: Some(api_version),
+                    input_tokens: Some(input_tokens),
+                    output_tokens: Some(output_tokens),
+                    latency_ms: Some(latency_ms),
+                    action_intent,
+                    confidence,
+                    keyboard_visual_annotation,
+                },
             );
 
             // Write reasoning.jsonl to local scratch dir.
@@ -1901,14 +1879,8 @@ pub async fn serve_tcp(
     bind_addr: String,
     port: u16,
     token: String,
-    registry: SessionRegistry,
-    config: Config,
-    done_handles: crate::capture::DoneHandleMap,
-    push_handles: crate::capture::PushHandleMap,
-    kafka_session_map: crate::kafka::KafkaSessionMap,
-    storage_router: std::sync::Arc<StorageRouter>,
+    services: IpcServices,
     tls_acceptor: TlsAcceptor,
-    reasoning_maps: crate::capture::ReasoningMapsRef,
 ) -> anyhow::Result<()> {
     use tokio::net::TcpListener;
 
@@ -1924,17 +1896,11 @@ pub async fn serve_tcp(
             Ok((stream, peer)) => {
                 tracing::debug!("IPC TCP: new connection from {peer}");
                 crate::observability::metrics().ipc_tcp_connections_active.inc();
-                let reg   = registry.clone();
-                let cfg   = config.clone();
-                let dh    = done_handles.clone();
-                let ph    = push_handles.clone();
-                let tok   = token.clone();
-                let ksm   = kafka_session_map.clone();
-                let sr    = storage_router.clone();
-                let acc   = tls_acceptor.clone();
-                let rm    = reasoning_maps.clone();
+                let tok = token.clone();
+                let acc = tls_acceptor.clone();
+                let conn_services = services.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_tcp_connection(stream, peer, tok, acc, reg, cfg, dh, ph, ksm, sr, rm).await {
+                    if let Err(e) = handle_tcp_connection(stream, peer, tok, acc, conn_services).await {
                         tracing::warn!("IPC TCP connection error from {peer}: {e}");
                     }
                     crate::observability::metrics().ipc_tcp_connections_active.dec();
@@ -1957,19 +1923,20 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 async fn handle_annotator_connection<R, W>(
     mut lines: tokio::io::Lines<BufReader<R>>,
     mut writer: W,
-    mut registry: SessionRegistry,
-    config: Config,
-    storage_router: std::sync::Arc<StorageRouter>,
+    services: IpcServices,
     peer: std::net::SocketAddr,
     annotator_id: String,
     key: String,
-    _reasoning_maps: crate::capture::ReasoningMapsRef,
 ) -> anyhow::Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::AsyncWriteExt;
+
+    // Bound to the same names the body already uses. The annotator path needs
+    // only three of the seven services; the rest ride along in the struct.
+    let IpcServices { mut registry, config, storage_router, .. } = services;
 
     let send_msg = |msg: OutboundMessage| async move {
         serde_json::to_string(&msg).map(|mut s| { s.push('\n'); s })
@@ -2150,7 +2117,7 @@ async fn handle_annotator_message(
 
                 if filter_tenants {
                     // Fetch tenant_id for this session and check against allowed prefixes.
-                    match registry.get(&id).await {
+                    match registry.get(id).await {
                         Ok(record) => {
                             let visible = allowed_tenants.iter().any(|prefix| {
                                 record.tenant_id.starts_with(prefix.as_str())
@@ -2748,13 +2715,7 @@ async fn handle_tcp_connection(
     peer: std::net::SocketAddr,
     token: String,
     tls_acceptor: TlsAcceptor,
-    registry: SessionRegistry,
-    config: Config,
-    done_handles: crate::capture::DoneHandleMap,
-    push_handles: crate::capture::PushHandleMap,
-    kafka_session_map: crate::kafka::KafkaSessionMap,
-    storage_router: std::sync::Arc<StorageRouter>,
-    reasoning_maps: crate::capture::ReasoningMapsRef,
+    services: IpcServices,
 ) -> anyhow::Result<()> {
     use tokio::io::AsyncWriteExt;
 
@@ -2785,7 +2746,7 @@ async fn handle_tcp_connection(
             serde_json::from_str::<InboundMessage>(&first_line)
         {
             return handle_annotator_connection(
-                lines, writer, registry, config, storage_router, peer, annotator_id, key, reasoning_maps,
+                lines, writer, services, peer, annotator_id, key,
             ).await;
         }
         let msg = serde_json::to_string(&OutboundMessage::Error {
@@ -2808,7 +2769,7 @@ async fn handle_tcp_connection(
     }
 
     tracing::debug!("IPC TCP: authenticated from {peer}");
-    handle_connection_inner(lines, writer, registry, config, done_handles, push_handles, kafka_session_map, storage_router, reasoning_maps).await
+    handle_connection_inner(lines, writer, services).await
 }
 
 #[cfg(test)]

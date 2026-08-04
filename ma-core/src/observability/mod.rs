@@ -102,7 +102,7 @@ pub fn init_metrics(config: &ObservabilityConfig) -> anyhow::Result<()> {
     let vlm_errors_by_provider: Family<ProviderErrorLabels, Counter<u64, AtomicU64>> = Family::default();
     let vlm_tokens_consumed_total: Counter<u64, AtomicU64> = Counter::default();
     let vlm_request_latency_ms = Histogram::new(
-        [50.0, 100.0, 250.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 30000.0].into_iter(),
+        [50.0, 100.0, 250.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 30000.0],
     );
     let vlm_circuit_breaker_open: Gauge<f64, AtomicU64> = Gauge::default();
     let sessions_reasoning_degraded: Gauge<f64, AtomicU64> = Gauge::default();

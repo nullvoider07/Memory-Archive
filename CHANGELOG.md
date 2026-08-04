@@ -87,6 +87,28 @@ Five defects found during an annotation and compile pass, plus copy-on-select.
 
 - The finalize dialog no longer claims a "90-day retention". No session status
   has carried a TTL since 0.3.2; the text was left over from the removed policy.
+- **The IPC handler chain takes one `IpcServices` struct instead of seven
+  positional services.** `registry`, `config`, `done_handles`, `push_handles`,
+  `kafka_session_map`, `storage_router` and `reasoning_maps` were threaded
+  individually through `serve` → `handle_connection` →
+  `handle_connection_inner` → `handle_message`, and again through `serve_tcp` →
+  `handle_tcp_connection` → `handle_annotator_connection`, putting every
+  signature past ten parameters. Cloning is as cheap as before — each field is a
+  handle, so a per-connection clone shares the same state. Function bodies are
+  unchanged: each destructures into the names it already used.
+- `run_watch_loop` takes a `WatchLoopArgs`, and `build_automated_entry` takes an
+  `AutomatedReasoning` struct. The latter had eleven positional parameters,
+  five of them consecutive `Option<String>`/`Option<u32>`, where a transposed
+  pair would type-check and write the wrong provenance into `reasoning.jsonl`.
+- `ma-core` is clippy-clean: 39 warnings to 0. Most were mechanical
+  (`needless_borrow`, `useless_conversion`, `or_default`); the rest are the
+  refactors above. Three are silenced with a documented reason rather than
+  changed: the `collapsible_if` family, because every site is an
+  `if cond { if let … }` whose collapsed form needs let-chains (Rust 1.88) and
+  the documented build requirement is Rust 1.85; a test fixture builder in
+  `convert`; and `large_enum_variant` on `InboundMessage`, where boxing the
+  largest variant would alter the shape serde derives at the protocol boundary
+  with ma-app for a value built once per request.
 
 ### Tests
 

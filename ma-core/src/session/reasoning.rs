@@ -41,20 +41,44 @@ pub struct ReasoningEntry {
 }
 
 /// Build a reasoning entry for an automated-mode step from a ReasoningResult IPC message.
+/// What the model reported for one step, as delivered by `ReasoningResult`.
+///
+/// These were eleven positional parameters, five of them consecutive
+/// `Option<String>` / `Option<u32>` — a transposed pair would have type-checked
+/// and silently written the wrong provenance into `reasoning.jsonl`. Named
+/// fields make that mistake impossible to compile.
+pub struct AutomatedReasoning {
+    pub reasoning: String,
+    pub source: String,
+    pub provider: Option<String>,
+    pub model_id: Option<String>,
+    pub api_version: Option<String>,
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
+    pub latency_ms: Option<u32>,
+    pub action_intent: Option<String>,
+    pub confidence: Option<f32>,
+    pub keyboard_visual_annotation: Option<serde_json::Value>,
+}
+
 pub fn build_automated_entry(
     step: &crate::session::metadata::StepEntry,
-    reasoning: String,
-    source: String,
-    provider: Option<String>,
-    model_id: Option<String>,
-    api_version: Option<String>,
-    input_tokens: Option<u32>,
-    output_tokens: Option<u32>,
-    latency_ms: Option<u32>,
-    action_intent: Option<String>,
-    confidence: Option<f32>,
-    keyboard_visual_annotation: Option<serde_json::Value>,
+    model: AutomatedReasoning,
 ) -> ReasoningEntry {
+    let AutomatedReasoning {
+        reasoning,
+        source,
+        provider,
+        model_id,
+        api_version,
+        input_tokens,
+        output_tokens,
+        latency_ms,
+        action_intent,
+        confidence,
+        keyboard_visual_annotation,
+    } = model;
+
     ReasoningEntry {
         step_id: step.step_id,
         timestamp_action: step.timestamp.clone(),
