@@ -6,11 +6,18 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.3.3  
+**Version:** 0.3.4  
 **Last Updated:** August 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.3.3** — the annotation TUI no longer stacks a new image viewer on every open:
+> **✨ What's new in 0.3.4** — five defects found during an annotation and compile pass, plus copy-on-select:
+> - **Selecting text with the mouse copies it.** No region of the TUI could be copied before. The selection goes to the system clipboard as well as OSC 52, so it pastes into other applications, not just back into the TUI. A plain click selects nothing and copies nothing, so clicking never clears a clipboard filled elsewhere. The helper runs on one coalescing background thread: spawning it takes ~64 ms and the handler runs on the event loop, so an inline call would stall the UI on every drag, while a thread per selection let concurrent helpers finish out of order and leave the clipboard holding an *earlier* selection than the one just made.
+> - **`memory-archive update` can replace a running `ma-core`.** The POSIX path copied the new binary over the destination in place, which Linux refuses with `ETXTBSY` when the target is executing — and `ma-core` normally is, so updating meant stopping the daemon first. The binary is now written to a temp file and renamed over the target; `rename(2)` is permitted and the running process keeps its old inode. The temp file is created with `mkstemp` (O_EXCL, unguessable name, mode 0600) so a pre-planted symlink at a predictable path cannot redirect the write.
+> - **`ma-core` removes its Unix socket on shutdown.** A leftover `ma.sock` reads as a running daemon and has repeatedly misdirected debugging. The socket and PID file are removed only if the PID file still names the exiting process, so a slow shutdown cannot delete the files of an instance that has already taken over.
+> - **Ctrl+N reaches a step it has passed.** Step advancement scanned forward only, so a step left pending behind the cursor — what happens whenever annotation starts part-way through a session — was unreachable by keyboard. At the last step it did nothing at all: no navigation, no completion prompt, no message, and no way to finish the session from the keyboard. The scan now wraps to the start and announces the jump.
+> - **Confirm dialogs are navigable and honest.** Left/Right move between buttons in every dialog (they were never wired; Textual moves focus with Tab). The focused button is now the one that looks selected — Quit was rendered with a colour fill while Cancel held focus, so the loudest button was not the one Enter would activate. And the key hints are visible again: labels are parsed as content markup, so `Quit  [q]` had `[q]` eaten as an unknown tag and rendered as `Quit`, hiding the only key that closed the dialog.
+>
+> Earlier in 0.3.3 — the annotation TUI no longer stacks a new image viewer on every open:
 > - **Opening a step's image replaces the previous viewer instead of stacking another one.** `ImageReview._open_image` spawned the viewer with `subprocess.Popen` and never kept the handle, so nothing tracked or closed it and every Enter or click launched another fullscreen `feh`. It surfaced as the image opening "in a new tab", and as Escape appearing not to close it — feh binds Escape to quit but quits only the **focused** instance, so closing the top of a stack of identical fullscreen windows leaves an identical image on screen. The extra window was never useful: all three frames (`before`, `at`, `after`) are already passed to one instance with `--start-at`. The viewer is also closed when the TUI unmounts, so it can no longer outlive the session, and the tracked handle reaps the child instead of leaving a zombie. The macOS and Windows launchers stay untracked on purpose — `open` and `os.startfile` hand off to a separate application and exit, so their handle is not the window.
 >
 > Earlier in 0.3.2 — session registry records no longer expire, and deletion can no longer remove a recording it does not own:
@@ -168,7 +175,7 @@ The built-in TUI (built on Textual) provides a two-pane interface: a virtual-scr
 
 ### Install, Update, and Uninstall Tooling
 
-Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) and Windows (`install.ps1`), covering both the Rust binaries and the Python wheel. Every download is verified against a published `SHA256SUMS` manifest before extraction, and archives are unpacked with path-traversal guards. The `memory-archive update` command downloads and checksum-verifies the latest platform archive and replaces binaries in place. The `memory-archive uninstall` command removes the binaries and CLI launcher and optionally purges all local state (`--purge`). All three paths handle version transitions cleanly without leaving orphaned files.
+Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) and Windows (`install.ps1`), covering both the Rust binaries and the Python wheel. Every download is verified against a published `SHA256SUMS` manifest before extraction, and archives are unpacked with path-traversal guards. The `memory-archive update` command downloads and checksum-verifies the latest platform archive, then swaps each binary into place by renaming a temp file over it — so a running `ma-core` does not block the update, and a partially written binary is never visible at the final path. The temp file is created with `mkstemp` (`O_EXCL`, unguessable name, mode `0600`), so a symlink planted at a predictable path cannot redirect the write. The `memory-archive uninstall` command removes the binaries and CLI launcher and optionally purges all local state (`--purge`). All three paths handle version transitions cleanly without leaving orphaned files.
 
 ---
 
@@ -968,7 +975,7 @@ Check `ma-core` connectivity. Sends a `Ping` IPC message and prints the `ma-core
 
 ```bash
 memory-archive ping
-# → ma-core v0.3.3 — OK
+# → ma-core v0.3.4 — OK
 ```
 
 ---
@@ -976,6 +983,8 @@ memory-archive ping
 ### `memory-archive update`
 
 Check for and apply updates. Downloads the latest release archive for the current platform from GitHub Releases and replaces binaries and wheel in place.
+
+`ma-core` does not need to be stopped first: each binary is written to a temp file and renamed over the target, and `rename(2)` succeeds over a running executable — the running process keeps its old inode until it exits. Restart `ma-core` afterwards to pick up the new version.
 
 ```
 memory-archive update [OPTIONS]
@@ -1233,6 +1242,8 @@ memory-archive server start --daemon --log-file /var/log/ma-core.log
 
 Stop a running `ma-core` daemon. Reads the PID from `~/.memory-archive/ma-core.pid` and sends `SIGTERM` (Linux/macOS) or calls `taskkill` (Windows).
 
+On a clean shutdown `ma-core` flags any active sessions as interrupted, then removes both `ma-core.pid` and `ma.sock`. Both are removed only if the PID file still names the exiting process, so a shutdown that outlasts a successor's startup cannot delete the newer instance's files. A socket left behind after an unclean kill is harmless — startup unlinks a stale one before binding.
+
 ```bash
 memory-archive server stop
 ```
@@ -1321,7 +1332,7 @@ The image pane (top-left) shows the at-frame for the selected step along with it
 | `PgUp` | Fast scroll up (5 steps) |
 | `e` / `Enter` | Open selected step for editing |
 | `Space` | Toggle step accordion (expand/collapse) |
-| `Ctrl+N` | Save current reasoning, mark step complete, advance to next step |
+| `Ctrl+N` | Save current reasoning, mark step complete, advance to the next pending step |
 | `Ctrl+S` | Save current reasoning without advancing |
 | `Ctrl+Z` | Undo last edit in reasoning editor |
 | `Ctrl+Y` | Redo last undone edit |
@@ -1332,6 +1343,23 @@ The image pane (top-left) shows the at-frame for the selected step along with it
 | `f` | Fit image to pane dimensions |
 | `?` | Open HelpOverlay (full keyboard shortcut reference) |
 | `Ctrl+Q` | Quit (QuitConfirm overlay if unsaved changes exist) |
+| `←` / `→` | Move between buttons in any confirmation dialog |
+| *drag* | Selecting text with the mouse copies it to the system clipboard |
+
+`Ctrl+N` looks forward first. When no step ahead is pending it wraps to the
+start and opens the earliest pending step, announcing the jump in the status bar
+— an annotator who begins part-way through a session leaves earlier steps
+pending, and those would otherwise be unreachable from the keyboard. When the
+current step is the only one left pending it says so rather than doing nothing.
+
+### Copying text
+
+Selecting any text with the mouse copies it — no copy keystroke. The selection
+goes to the system clipboard (via `wl-copy`, `xclip`, `xsel`, `pbcopy` or
+`clip`, whichever is present) as well as to the terminal via OSC 52, so it can
+be pasted into other applications and not only back into the reasoning editor. A
+plain click selects nothing and copies nothing, so clicking never overwrites a
+clipboard filled elsewhere.
 
 ### Autosave
 
@@ -1355,6 +1383,11 @@ The TUI automatically positions the cursor on the first `⬜ Pending` step. This
 | `CrashRecovery` | TUI open with an `in_progress` step detected | Prompts to resume or reset the in-progress step |
 | `AnnotationComplete` | All steps have status Complete or Skipped | Offers "compile now" (launches CompilerApp immediately) or "compile later" |
 | `HelpOverlay` | `?` | Full keyboard shortcut reference panel |
+
+Every confirmation dialog is navigable with `←` / `→` as well as `Tab`, and each
+button shows its own shortcut key in brackets. Focus starts on the
+non-destructive choice — `Enter` activates the focused button, so a dialog whose
+other option discards work never defaults to it.
 
 ### Image Viewer
 

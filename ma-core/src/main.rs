@@ -563,6 +563,7 @@ async fn main() -> anyhow::Result<()> {
         let sr = storage_router.clone();
         let cfg_signal = cfg.clone();
         let pid_path_signal = pid_path.clone();
+        let socket_path_signal = socket_path.clone();
         tokio::spawn(async move {
             #[cfg(unix)]
             {
@@ -628,7 +629,31 @@ async fn main() -> anyhow::Result<()> {
             }
 
             tracing::warn!("All active sessions flagged — exiting");
-            let _ = std::fs::remove_file(&pid_path_signal);
+
+            // Clean up only if the PID file still names this process. Startup
+            // SIGTERMs an existing ma-core and waits just 500 ms before writing
+            // its own PID file and binding the socket, but the work above is
+            // per-session Redis and storage I/O and can outlast that window —
+            // at which point removing these unconditionally would delete the
+            // successor's socket and PID file, not this process's.
+            let owns_runtime_files = std::fs::read_to_string(&pid_path_signal)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .is_some_and(|pid| pid == std::process::id());
+
+            if owns_runtime_files {
+                let _ = std::fs::remove_file(&pid_path_signal);
+                // The socket is unlinked here rather than left for the next
+                // start to clear: a leftover ma.sock reads as a running daemon
+                // and has repeatedly sent debugging down the wrong path.
+                let _ = std::fs::remove_file(&socket_path_signal);
+            } else {
+                tracing::warn!(
+                    "PID file no longer names this process — leaving socket and PID file \
+                     for the newer instance"
+                );
+            }
+
             std::process::exit(0);
         });
     }

@@ -3,6 +3,109 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.4] — 2026-08-04
+
+Five defects found during an annotation and compile pass, plus copy-on-select.
+
+### Fixed
+
+- **`memory-archive update` can now replace a running `ma-core`.** The POSIX
+  branch copied the new binary over the destination in place, which Linux
+  refuses with `ETXTBSY` when the target is a running executable — and `ma-core`
+  normally is, so the update aborted unless the daemon was stopped first. The
+  new binary is written to a sibling temp file, made executable (and on macOS
+  de-quarantined and signed) there, then `os.replace`d over the target:
+  `rename(2)` over a running binary is permitted and the running process keeps
+  its old inode. This mirrors what the Windows path already did.
+- **`ma-core` removes its Unix socket on shutdown.** The SIGTERM handler removed
+  the PID file but left `ma.sock` behind. Startup masked it by unlinking any
+  existing socket before binding, so nothing broke — but a leftover socket reads
+  as a running daemon and has repeatedly misdirected debugging. Both files are
+  now removed only if the PID file still names the exiting process: startup
+  SIGTERMs an existing `ma-core` and waits just 500 ms before writing its own PID
+  file and binding, while the handler's per-session Redis and storage I/O can
+  outlast that window, so an unconditional removal could delete the successor's
+  socket. That race already existed for the PID file.
+- **Ctrl+N returns to a step it has passed.** `_advance_to_next_pending` scanned
+  forward only, so a step left pending behind the cursor — what happens whenever
+  annotation starts part-way through a session — was unreachable by keyboard for
+  the rest of the session. Worse, at the last step the forward scan found
+  nothing, `all_done` was `False` because of that pending step, and the fallback
+  branch performed no navigation, showed no completion prompt and printed no
+  message: Ctrl+N looked broken and the session could not be finished from the
+  keyboard. The scan now wraps to the start, announces the backwards jump, and
+  the remaining fallback says why it did not move.
+- **Confirm dialogs respond to Left/Right.** `CompilerQuitOverlay`,
+  `CompilerFinalizeOverlay`, `QuitConfirmOverlay` and `CrashRecoveryOverlay`
+  bound only Escape and a letter, and Textual moves focus with Tab/Shift+Tab, so
+  the arrow keys did nothing. Arrow navigation with wrap-around — previously
+  implemented once in `AnnotationCompleteOverlay` — is now a shared
+  `ButtonNavModal` base used by all five dialogs.
+- **The focused button is now the one that looks selected.** Confirm dialogs
+  focused Cancel while rendering Quit with a `variant` colour fill, so the
+  loudest button was not the one Enter would activate — the dangerous direction
+  on a destructive choice. The fills are gone; focus is the only selection
+  signal, and it stays on the non-destructive button.
+- **Dialog key hints are visible again.** Button labels are parsed as content
+  markup, so `Button("Quit  [q]")` had `[q]` consumed as an unknown tag and
+  rendered as `Quit` — hiding the only key that closed the dialog. Eleven buttons
+  across both screens were affected. Labels are now built as `Content`, which
+  bypasses the markup parser.
+
+### Added
+
+- **Selecting text with the mouse copies it.** No region of the TUI could be
+  copied. Textual 8.x implements selection and exposes
+  `Screen.get_selected_text()`, but binds nothing to `action_copy_text`, so a
+  selection was made and then dropped. Both apps now handle the `TextSelected`
+  event Textual posts at each mouse release and copy the selection. Delivery
+  goes to two destinations: OSC 52 via `App.copy_to_clipboard` for terminals
+  that support it, and an external helper (`wl-copy`, `xclip`, `xsel`, `pbcopy`,
+  `clip`) for the system clipboard proper, which is what makes the text pastable
+  into other applications. An empty selection — every plain click posts the same
+  event — copies nothing, so clicking never clears the clipboard.
+
+  The helper runs on a single coalescing background thread. Spawning it takes
+  ~64 ms (114 ms worst case) and the handler runs on the event loop, so an
+  inline call stalls the UI for the length of every drag; a thread per selection
+  is worse still — 300 back-to-back selections left 137 helpers running at once
+  and the clipboard holding selection **150** of 299, because concurrent helpers
+  finish out of order. One helper at a time, newest text wins.
+
+### Security
+
+- **The updater's temp file can no longer be redirected by a planted symlink.**
+  The binary replacement wrote to a sibling path derived from the process id,
+  and `shutil.copy2` follows symlinks — so anyone able to create a file in the
+  install directory could pre-plant `ma-core.new-<pid>` pointing elsewhere and
+  have the update overwrite that target instead. The temp file is now created
+  with `tempfile.mkstemp` (O_EXCL, unguessable name, mode 0600), and the
+  source's mode is applied afterwards. Demonstrated both ways: the previous
+  shape overwrites the symlink target, the current one leaves it untouched.
+
+### Changed
+
+- The finalize dialog no longer claims a "90-day retention". No session status
+  has carried a TTL since 0.3.2; the text was left over from the removed policy.
+
+### Tests
+
+- `test_button_nav.py`, `test_advance_to_next_pending.py`, `test_clipboard.py`
+  and `test_updater_binary_replace.py` — 49 new cases. The dialogs are driven
+  headless through Textual's own pilot (`asyncio.run` drives the async pilot, so
+  no `pytest-asyncio` dependency is added), and the updater test reproduces
+  `ETXTBSY` against a genuinely running ELF before asserting the fix clears it.
+- A stress pass covered 30 daemon start/stop cycles, 15 takeover races, 400
+  randomised annotation sessions driven by Ctrl+N alone, 300 back-to-back
+  selections, and 400 binary replacements (200 sequential against a running
+  process, 200 across 8 concurrent threads).
+- `test_it_replaces_a_binary_that_is_currently_running` was flaky as first
+  written: it copied `/usr/bin/sleep` to a file named `bin`, and coreutils is a
+  multi-call binary that dispatches on `argv[0]`, so the child exited
+  immediately with "unknown program". A dead child holds no text image, so the
+  `ETXTBSY` assertion was passing only by racing the exit. The copy keeps its
+  name now, and the test asserts the process is alive before relying on it.
+
 ## [0.3.3] — 2026-08-04
 
 The annotation TUI stacked a new image viewer on every open.

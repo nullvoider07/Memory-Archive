@@ -20,7 +20,7 @@ from rich.console import Console
 try:
     from ma_app import __version__
 except ImportError:
-    __version__ = "0.3.3"
+    __version__ = "0.3.4"
 
 # =============================================================================
 # Constants
@@ -289,6 +289,46 @@ def _macos_finalize(binary: Path) -> None:
         ["codesign", "--force", "--deep", "--sign", "-", str(binary)],
         check=False, capture_output=True,
     )
+
+
+def _replace_binary_posix(src: Path, dst: Path, is_macos: bool) -> None:
+    """
+    Replace a binary that may currently be running.
+
+    Copying onto the destination fails with ETXTBSY on Linux when the target is
+    a running executable — which `ma-core` normally is during an update, so
+    `memory-archive update` aborted unless the daemon was stopped first.
+    rename(2) over a running binary is allowed: the running process keeps its
+    open inode, which the kernel reclaims when the last reference goes away.
+
+    The temp file is a sibling of the destination so the rename stays within one
+    filesystem (rename cannot cross devices), and it is made executable — and on
+    macOS de-quarantined and signed — *before* the rename, so the binary is
+    never visible at its final path in a not-yet-runnable state.
+
+    mkstemp creates that file with O_EXCL and an unguessable name, so a
+    pre-planted symlink at the temp path cannot redirect the write: a predictable
+    name in a directory anyone else can write to would let another user aim the
+    copy at a file of their choosing. It also opens at mode 0600, so the contents
+    are never briefly readable by others; the destination's real mode is applied
+    from the source afterwards.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=str(dst.parent), prefix=f"{dst.name}.new-")
+    tmp = Path(tmp_name)
+    try:
+        with open(fd, "wb") as out, open(src, "rb") as inp:
+            shutil.copyfileobj(inp, out)
+        shutil.copystat(src, tmp)
+        _chmod_exec(tmp)
+        if is_macos:
+            _macos_finalize(tmp)
+        os.replace(tmp, dst)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _replace_binary_windows(src: Path, dst: Path) -> None:
@@ -592,10 +632,7 @@ def _update_command(
             if is_windows:
                 _replace_binary_windows(src, dst)
             else:
-                shutil.copy2(src, dst)
-                _chmod_exec(dst)
-                if is_macos:
-                    _macos_finalize(dst)
+                _replace_binary_posix(src, dst, is_macos)
 
             _console.print(f"[green]  [OK] Updated {src_name}[/green]")
 

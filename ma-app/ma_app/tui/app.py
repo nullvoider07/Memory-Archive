@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 from pathlib import Path
-from textual.app import App
 from typing import ClassVar
 from textual.binding import Binding, BindingType
 from ma_app.tui.screens.annotation import AnnotationScreen
 from ma_app.tui.screens.compiler import CompilerScreen
+from ma_app.tui.clipboard import ClipboardApp
 from ma_app.tui.session_loader import SessionState
 
 
-class AnnotationApp(App):
+class AnnotationApp(ClipboardApp):
     """
     Memory Archive TUI — root Textual application.
 
@@ -92,7 +92,7 @@ class AnnotationApp(App):
             logging.getLogger(__name__).debug("Deleted temp session dir: %s", temp_dir)
 
 
-class CompilerApp(App):
+class CompilerApp(ClipboardApp):
     """
     Memory Archive compiler TUI — wraps the memory.md editor screen.
 

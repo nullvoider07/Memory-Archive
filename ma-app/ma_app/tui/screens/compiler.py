@@ -8,10 +8,12 @@ from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.screen import ModalScreen, Screen
+from textual.screen import Screen
 from textual.widgets import Button, Label, TextArea
 from textual.css.query import NoMatches
 from textual.widget import Widget
+
+from ma_app.tui.widgets.button_nav import ButtonNavModal, hint_label
 
 
 class CompilerStatusBar(Widget):
@@ -62,7 +64,7 @@ class CompilerStatusBar(Widget):
         self.set_timer(0.8, lambda: None)
 
 
-class CompilerQuitOverlay(ModalScreen):
+class CompilerQuitOverlay(ButtonNavModal):
     """Confirm quitting the compile stage without finalizing.
 
     Dismissed with 'quit' (exit, session stays resumable) or None (cancel).
@@ -73,6 +75,13 @@ class CompilerQuitOverlay(ModalScreen):
         Binding("q",      "quit",   show=False),
     ]
 
+    BUTTON_ORDER  = ("btn-quit", "btn-cancel")
+    INITIAL_FOCUS = "btn-cancel"
+
+    # Buttons carry no `variant` fill. A coloured fill outranks the focus ring
+    # visually, so the loudest button reads as selected while Enter activates
+    # the focused one — on a quit dialog those are opposite actions. Focus is
+    # the only selection signal here; colour marks consequence, per-id below.
     DEFAULT_CSS = """
     CompilerQuitOverlay { align: center middle; }
     #cq-box {
@@ -88,7 +97,16 @@ class CompilerQuitOverlay(ModalScreen):
         width: 1fr; height: auto;
         layout: horizontal; align: center middle;
     }
-    #cq-buttons Button { margin: 0 1; }
+    #cq-buttons Button {
+        margin: 0 1;
+        height: 3;
+        min-width: 18;
+        background: #0f1117;
+        color: #e2e8f0;
+        border: round #64748b;
+    }
+    #btn-quit:focus   { background: #1a1d27; border: round #f59e0b; color: #ffffff; text-style: bold; }
+    #btn-cancel:focus { background: #1a1d27; border: round #5865f2; color: #ffffff; text-style: bold; }
     """
 
     def compose(self) -> ComposeResult:
@@ -100,14 +118,8 @@ class CompilerQuitOverlay(ModalScreen):
                 id="cq-body",
             )
             with Widget(id="cq-buttons"):
-                yield Button("Quit  [q]",     id="btn-quit",   variant="warning")
-                yield Button("Cancel  [Esc]", id="btn-cancel", variant="primary")
-
-    def on_mount(self) -> None:
-        try:
-            self.query_one("#btn-cancel", Button).focus()
-        except NoMatches:
-            pass
+                yield Button(hint_label("Quit", "q"),     id="btn-quit")
+                yield Button(hint_label("Cancel", "Esc"), id="btn-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         mapping: dict[str, str | None] = {
@@ -120,7 +132,7 @@ class CompilerQuitOverlay(ModalScreen):
     def action_cancel(self) -> None: self.dismiss(None)
 
 
-class CompilerFinalizeOverlay(ModalScreen):
+class CompilerFinalizeOverlay(ButtonNavModal):
     """Confirm finalizing the memory.
 
     Dismissed with 'finalize' (mark the session complete) or None (cancel).
@@ -130,6 +142,9 @@ class CompilerFinalizeOverlay(ModalScreen):
         Binding("escape", "cancel",   show=False),
         Binding("f",      "finalize", show=False),
     ]
+
+    BUTTON_ORDER  = ("btn-finalize", "btn-cancel")
+    INITIAL_FOCUS = "btn-cancel"
 
     DEFAULT_CSS = """
     CompilerFinalizeOverlay { align: center middle; }
@@ -146,26 +161,29 @@ class CompilerFinalizeOverlay(ModalScreen):
         width: 1fr; height: auto;
         layout: horizontal; align: center middle;
     }
-    #cf-buttons Button { margin: 0 1; }
+    #cf-buttons Button {
+        margin: 0 1;
+        height: 3;
+        min-width: 18;
+        background: #0f1117;
+        color: #e2e8f0;
+        border: round #64748b;
+    }
+    #btn-finalize:focus { background: #1a1d27; border: round #22c55e; color: #ffffff; text-style: bold; }
+    #btn-cancel:focus   { background: #1a1d27; border: round #5865f2; color: #ffffff; text-style: bold; }
     """
 
     def compose(self) -> ComposeResult:
         with Widget(id="cf-box"):
             yield Label("Finalize memory", id="cf-title")
             yield Label(
-                "This marks the session complete and locks it (90-day retention).\n"
-                "You will not be able to edit it again. Finalize now?",
+                "This marks the session complete and locks it. The record is kept\n"
+                "indefinitely. You will not be able to edit it again. Finalize now?",
                 id="cf-body",
             )
             with Widget(id="cf-buttons"):
-                yield Button("Finalize  [f]", id="btn-finalize", variant="success")
-                yield Button("Cancel  [Esc]", id="btn-cancel",   variant="primary")
-
-    def on_mount(self) -> None:
-        try:
-            self.query_one("#btn-cancel", Button).focus()
-        except NoMatches:
-            pass
+                yield Button(hint_label("Finalize", "f"), id="btn-finalize")
+                yield Button(hint_label("Cancel", "Esc"), id="btn-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         mapping: dict[str, str | None] = {

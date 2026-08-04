@@ -18,6 +18,7 @@ from ma_app.tui.widgets.step_list import StepList
 from ma_app.tui.widgets.reasoning_editor import ReasoningEditor
 from ma_app.tui.widgets.image_review import ImageReview
 from ma_app.tui.widgets.stats_pane import StatsPane
+from ma_app.tui.widgets.button_nav import ButtonNavModal, hint_label
 
 # Key hints bar
 class KeyHintsBar(Widget):
@@ -107,7 +108,7 @@ class JumpToStepOverlay(ModalScreen):
             pass
 
 
-class QuitConfirmOverlay(ModalScreen):
+class QuitConfirmOverlay(ButtonNavModal):
     """Unsaved-changes confirmation. Dismissed with True (quit) or False."""
 
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -115,6 +116,9 @@ class QuitConfirmOverlay(ModalScreen):
         Binding("q",      "confirm", show=False),
         Binding("ctrl+q", "confirm", show=False),
     ]
+
+    BUTTON_ORDER  = ("btn-quit", "btn-cancel")
+    INITIAL_FOCUS = "btn-cancel"
 
     DEFAULT_CSS = """
     QuitConfirmOverlay { align: center middle; }
@@ -131,7 +135,16 @@ class QuitConfirmOverlay(ModalScreen):
         width: 1fr; height: auto;
         layout: horizontal; align: center middle;
     }
-    #quit-buttons Button { margin: 0 1; }
+    #quit-buttons Button {
+        margin: 0 1;
+        height: 3;
+        min-width: 18;
+        background: #0f1117;
+        color: #e2e8f0;
+        border: round #64748b;
+    }
+    #btn-quit:focus   { background: #1a1d27; border: round #ef4444; color: #ffffff; text-style: bold; }
+    #btn-cancel:focus { background: #1a1d27; border: round #5865f2; color: #ffffff; text-style: bold; }
     """
 
     def compose(self) -> ComposeResult:
@@ -143,14 +156,8 @@ class QuitConfirmOverlay(ModalScreen):
                 id="quit-body",
             )
             with Widget(id="quit-buttons"):
-                yield Button("Quit  [q]",     id="btn-quit",   variant="error")
-                yield Button("Cancel  [Esc]", id="btn-cancel", variant="primary")
-
-    def on_mount(self) -> None:
-        try:
-            self.query_one("#btn-cancel", Button).focus()
-        except NoMatches:
-            pass
+                yield Button(hint_label("Quit", "q"),     id="btn-quit")
+                yield Button(hint_label("Cancel", "Esc"), id="btn-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "btn-quit")
@@ -162,7 +169,7 @@ class QuitConfirmOverlay(ModalScreen):
         self.dismiss(False)
 
 
-class CrashRecoveryOverlay(ModalScreen):
+class CrashRecoveryOverlay(ButtonNavModal):
     """
     Shown on TUI launch when the previous session was killed mid-annotation.
     Dismissed with True (resume at cursor step) or False (go to step 1).
@@ -172,6 +179,9 @@ class CrashRecoveryOverlay(ModalScreen):
         Binding("escape", "start_fresh", show=False),
         Binding("r",      "resume",      show=False),
     ]
+
+    BUTTON_ORDER  = ("btn-resume", "btn-fresh")
+    INITIAL_FOCUS = "btn-resume"
 
     DEFAULT_CSS = """
     CrashRecoveryOverlay { align: center middle; }
@@ -222,19 +232,13 @@ class CrashRecoveryOverlay(ModalScreen):
             )
             with Widget(id="recovery-buttons"):
                 yield Button(
-                    f"Resume step {self._step_id}  [r]",
+                    hint_label(f"Resume step {self._step_id}", "r"),
                     id="btn-resume",
                 )
                 yield Button(
-                    "Start from step 1  [Esc]",
+                    hint_label("Start from step 1", "Esc"),
                     id="btn-fresh",
                 )
-
-    def on_mount(self) -> None:
-        try:
-            self.query_one("#btn-resume", Button).focus()
-        except NoMatches:
-            pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "btn-resume")
@@ -246,7 +250,7 @@ class CrashRecoveryOverlay(ModalScreen):
         self.dismiss(False)
 
 
-class AnnotationCompleteOverlay(ModalScreen):
+class AnnotationCompleteOverlay(ButtonNavModal):
     """
     Shown when the last step is annotated or skipped.
     Dismissed with 'compile', 'later', or 'quit'.
@@ -258,6 +262,9 @@ class AnnotationCompleteOverlay(ModalScreen):
         Binding("q", "quit_now",      show=False),
         Binding("escape", "quit_now", show=False),
     ]
+
+    BUTTON_ORDER  = ("btn-compile", "btn-later", "btn-quit")
+    INITIAL_FOCUS = "btn-compile"
 
     DEFAULT_CSS = """
     AnnotationCompleteOverlay {
@@ -311,28 +318,9 @@ class AnnotationCompleteOverlay(ModalScreen):
                 id="complete-body",
             )
             with Widget(id="complete-buttons"):
-                yield Button("Compile now  [c]",   id="btn-compile")
-                yield Button("Compile later  [l]", id="btn-later")
-                yield Button("Quit  [q]",          id="btn-quit")
-
-    def on_mount(self) -> None:
-        try:
-            self.query_one("#btn-compile", Button).focus()
-        except NoMatches:
-            pass
-
-    def on_key(self, event) -> None:
-        order = ["btn-compile", "btn-later", "btn-quit"]
-        focused = self.focused
-        if focused is None or not hasattr(focused, "id") or focused.id not in order:
-            return
-        idx = order.index(focused.id)
-        if event.key == "right":
-            event.stop()
-            self.query_one(f"#{order[(idx + 1) % len(order)]}", Button).focus()
-        elif event.key == "left":
-            event.stop()
-            self.query_one(f"#{order[(idx - 1) % len(order)]}", Button).focus()
+                yield Button(hint_label("Compile now", "c"),   id="btn-compile")
+                yield Button(hint_label("Compile later", "l"), id="btn-later")
+                yield Button(hint_label("Quit", "q"),          id="btn-quit")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         mapping = {
@@ -574,20 +562,36 @@ class AnnotationScreen(Screen):
         if current_idx is None:
             return
 
+        def _open(index: int, flash: str = "") -> None:
+            candidate = steps[index]
+            candidate.status = StepStatus.IN_PROGRESS
+            step_list.select_step(candidate.step_id, scroll=True)
+            step_list.refresh_step(candidate.step_id)
+            editor.enter_edit_mode(candidate)
+            image_pane.load_step(candidate)
+            for j in range(index + 1, len(steps)):
+                next_step = steps[j]
+                if next_step.status in (StepStatus.PENDING, StepStatus.IN_PROGRESS):
+                    image_pane.prefetch_step(next_step)
+                    break
+            self.update_stats(current_step_id=candidate.step_id, save_flash=flash)
+
+        def _pending(index: int) -> bool:
+            return steps[index].status in (StepStatus.PENDING, StepStatus.IN_PROGRESS)
+
         for i in range(current_idx + 1, len(steps)):
-            candidate = steps[i]
-            if candidate.status in (StepStatus.PENDING, StepStatus.IN_PROGRESS):
-                candidate.status = StepStatus.IN_PROGRESS
-                step_list.select_step(candidate.step_id, scroll=True)
-                step_list.refresh_step(candidate.step_id)
-                editor.enter_edit_mode(candidate)
-                image_pane.load_step(candidate)
-                for j in range(i + 1, len(steps)):
-                    next_step = steps[j]
-                    if next_step.status in (StepStatus.PENDING, StepStatus.IN_PROGRESS):
-                        image_pane.prefetch_step(next_step)
-                        break
-                self.update_stats(current_step_id=candidate.step_id)
+            if _pending(i):
+                _open(i)
+                return
+
+        # Nothing pending ahead. Wrap to the start rather than stopping: an
+        # annotator who began part-way through the session leaves earlier steps
+        # pending, and a forward-only scan makes them unreachable by keyboard
+        # for the rest of the session. The wrap is announced because a jump
+        # backwards is otherwise indistinguishable from a misfire.
+        for i in range(0, current_idx):
+            if _pending(i):
+                _open(i, flash=f"↩ Back to step {steps[i].step_id}")
                 return
 
         all_done = all(
@@ -597,7 +601,13 @@ class AnnotationScreen(Screen):
         if all_done:
             self.call_after_refresh(self._show_completion_prompt)
         else:
-            self.update_stats(current_step_id=current_id)
+            # Both scans found nothing yet the session is not complete — only
+            # reachable if the current step itself is the last pending one.
+            # Say so; a silent no-op here reads as Ctrl+N being broken.
+            self.update_stats(
+                current_step_id=current_id,
+                save_flash="No other step is pending",
+            )
 
     # StepList message handlers
     def on_step_list_step_selected(self, msg: StepList.StepSelected) -> None:
