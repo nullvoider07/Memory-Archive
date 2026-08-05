@@ -3,6 +3,40 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.5] — 2026-08-05
+
+### Fixed
+
+- **Finalizing the compiled memory works again, on `Ctrl+F`.** `Ctrl+D` never
+  reached the finalize action. Textual resolves a key against the focused
+  widget's bindings before the screen's, and the compile editor is a `TextArea`,
+  which binds `delete,ctrl+d` to `delete_right` — so every press **deleted the
+  character to the right of the cursor** and the confirm dialog never opened. A
+  draft was being edited by the key meant to lock it, silently, with no error
+  and no visible failure; reproduced against the real `CompilerApp`, where
+  `Ctrl+D` turned `# Overview` into ` Overview`.
+
+  The action is now `Ctrl+F`, which nothing in `TextArea`, `Input`, `Button`,
+  `App` or `Screen` claims, and it is bound with `priority=True` so a focused
+  editor cannot shadow it even if a future Textual does claim it. The priority
+  binding lives on `CompilerScreen` rather than `CompilerApp` on purpose:
+  priority bindings resolve against the *top* screen's binding chain, so an App
+  copy would still fire while the confirm overlay was open and stack a second
+  dialog.
+
+  A regression test asserts the invariant rather than the instance — no
+  non-priority binding on `CompilerScreen` or `AnnotationScreen` may share a key
+  with `TextArea` or `Input`, because such a binding can never fire and nothing
+  reports that it did not.
+
+### Changed
+
+- **The compile status bar and the README report the finalize key correctly.**
+  The README additionally described finalizing as a side effect of `Ctrl+Q` and
+  saving, in four places, which stopped being true when the explicit finalize
+  was introduced. `Ctrl+Q` saves the draft and leaves the session at
+  `pending_compilation`; only `Ctrl+F` finalizes.
+
 ## [0.3.4] — 2026-08-05
 
 Five defects found during an annotation and compile pass, plus copy-on-select.

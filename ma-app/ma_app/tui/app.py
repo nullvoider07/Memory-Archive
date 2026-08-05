@@ -97,14 +97,17 @@ class CompilerApp(ClipboardApp):
     Memory Archive compiler TUI — wraps the memory.md editor screen.
 
     Pushes CompilerScreen on mount. Exits with result='complete' when the user
-    finalizes (Ctrl+D), or result='quit' when the user exits without finalizing
+    finalizes (Ctrl+F), or result='quit' when the user exits without finalizing
     (Ctrl+Q) — in which case the session stays resumable at pending_compilation.
     """
 
     CSS_PATH = None
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+s", "save",        "Save",     show=False),
-        Binding("ctrl+d", "finalize",    "Finalize", show=False),
+        # Non-priority on purpose: the screen's priority binding handles the
+        # real case, and a priority copy here would still be in the binding
+        # chain while the confirm overlay is open, stacking a second dialog.
+        Binding("ctrl+f", "finalize",    "Finalize", show=False),
         Binding("ctrl+q", "quit_editor", "Quit",     show=False),
     ]
 

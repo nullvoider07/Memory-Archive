@@ -37,7 +37,7 @@ class CompilerStatusBar(Widget):
         yield Label("", id="compiler-status-left")
         yield Label(
             "[#5865f2]Ctrl+S[/#5865f2] Save  "
-            "[#22c55e]Ctrl+D[/#22c55e] Finalize  "
+            "[#22c55e]Ctrl+F[/#22c55e] Finalize  "
             "[#5865f2]Ctrl+Q[/#5865f2] Quit",
             id="compiler-status-right",
         )
@@ -202,15 +202,25 @@ class CompilerScreen(Screen):
 
     Pre-populated with the scaffolded draft from T4.2.
     Ctrl+S atomically saves to disk.
-    Ctrl+D finalizes: saves, confirms, then exits with result='complete'.
+    Ctrl+F finalizes: saves, confirms, then exits with result='complete'.
     Ctrl+Q quits without finalizing: saves, confirms, then exits with
     result='quit' — the session stays at pending_compilation and is resumable
     with `memory-archive compile`.
     """
 
+    # Finalize is priority so the focused editor cannot swallow it. Textual
+    # dispatches a key to the focused widget's bindings first, and the editor is
+    # a TextArea: its own "delete,ctrl+d" binding consumed the old Ctrl+D, which
+    # deleted a character instead of finalizing and reported nothing. Ctrl+F is
+    # unbound in TextArea, Input, Button, App and Screen, but priority keeps that
+    # from mattering if a future Textual claims it.
+    #
+    # Priority bindings are resolved against the *top* screen's binding chain,
+    # which is the confirm overlay while it is open — so this cannot re-fire and
+    # stack a second dialog. Keep it on the screen, not the App, for that reason.
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+s", "save",        "Save",     show=False),
-        Binding("ctrl+d", "finalize",    "Finalize", show=False),
+        Binding("ctrl+f", "finalize",    "Finalize", show=False, priority=True),
         Binding("ctrl+q", "quit_editor", "Quit",     show=False),
     ]
 

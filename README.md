@@ -6,11 +6,14 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.3.4  
+**Version:** 0.3.5  
 **Last Updated:** August 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.3.4** — five defects found during an annotation and compile pass, plus copy-on-select:
+> **✨ What's new in 0.3.5** — the compile stage can be finalized again:
+> - **`Ctrl+F` finalizes the compiled memory.** `Ctrl+D` never reached the finalize action: Textual resolves a key against the focused widget's bindings before the screen's, and the compile editor is a `TextArea`, which binds `delete,ctrl+d` to delete-right. So the key meant to lock the draft was silently *editing* it — one character per press — and the confirm dialog never opened. `Ctrl+F` is unclaimed by `TextArea`, `Input`, `Button`, `App` and `Screen`, and is bound `priority=True` so a focused editor cannot shadow it. It sits on the screen rather than the App because priority bindings resolve against the top screen's chain, and an App copy would re-fire with the confirm overlay open and stack a second dialog. `Ctrl+Q` still only quits — it saves the draft and leaves the session resumable at `pending_compilation`.
+>
+> Earlier in 0.3.4 — five defects found during an annotation and compile pass, plus copy-on-select:
 > - **Selecting text with the mouse copies it, in every region of the TUI.** No region could be copied before. A terminal application normally leaves the mouse to the terminal, whose own drag-to-select does the copying; Textual asks the terminal for mouse reporting instead, which takes selection away from it and makes it the application's problem — and Textual then implements selection twice. The screen-level model covers static content but records nothing inside `TextArea` and `Input`, which capture the mouse to run their own: the compile editor, the reasoning editor and the jump box, the panes where copying matters most. Both models are now read, screen first, origin widget second. `Ctrl+C` inside an editable region copies too, because `App.copy_to_clipboard` is overridden rather than called and every built-in copy funnels through it. The selection goes to the system clipboard as well as OSC 52, so it pastes into other applications, not just back into the TUI. A plain click selects nothing and copies nothing, so clicking never clears a clipboard filled elsewhere. The helper runs on one coalescing background thread: spawning it takes ~64 ms and the handler runs on the event loop, so an inline call would stall the UI on every drag, while a thread per selection let concurrent helpers finish out of order and leave the clipboard holding an *earlier* selection than the one just made.
 > - **`memory-archive update` can replace a running `ma-core`.** The POSIX path copied the new binary over the destination in place, which Linux refuses with `ETXTBSY` when the target is executing — and `ma-core` normally is, so updating meant stopping the daemon first. The binary is now written to a temp file and renamed over the target; `rename(2)` is permitted and the running process keeps its old inode. The temp file is created with `mkstemp` (O_EXCL, unguessable name, mode 0600) so a pre-planted symlink at a predictable path cannot redirect the write.
 > - **`ma-core` removes its Unix socket on shutdown.** A leftover `ma.sock` reads as a running daemon and has repeatedly misdirected debugging. The socket and PID file are removed only if the PID file still names the exiting process, so a slow shutdown cannot delete the files of an instance that has already taken over.
@@ -44,7 +47,7 @@
 > - **Sessions record which Control-Center produced them** (`actuation_agent_version`, `actuation_transport` in `metadata.json`). `position_captured` means "best-effort readback" before 1.2.0 and "verified, or false" from 1.2.0 on, so a consumer cannot interpret recorded coordinates correctly without knowing which wrote them.
 > - **Installer PATH persistence fixed** on both `install.sh` and `install.ps1`: the entry is now written based on the shell rc file (or the Windows registry), not the current process `$PATH`, so a shell that already had it exported no longer causes every fresh terminal to miss it.
 >
-> Earlier in 0.13.2: a critical updater hotfix — `memory-archive update` used `pip install --prefix` and destroyed the install it was updating. If your install is still broken from that bug, `update` alone cannot repair it (the broken copy decides how the next version installs); reinstall once via `install.sh`/`install.ps1`. Earlier in 0.13.1: a startup-sweep fix so a fully completed recording is never demoted to incomplete after a Redis rollback, and the Unix IPC socket locked to `0600`. Earlier in 0.13.0: frames for every mouse interaction, interrupted annotations surviving a restart, and an explicit `Ctrl+D` finalize at the compile stage.
+> Earlier in 0.13.2: a critical updater hotfix — `memory-archive update` used `pip install --prefix` and destroyed the install it was updating. If your install is still broken from that bug, `update` alone cannot repair it (the broken copy decides how the next version installs); reinstall once via `install.sh`/`install.ps1`. Earlier in 0.13.1: a startup-sweep fix so a fully completed recording is never demoted to incomplete after a Redis rollback, and the Unix IPC socket locked to `0600`. Earlier in 0.13.0: frames for every mouse interaction, interrupted annotations surviving a restart, and an explicit finalize at the compile stage (bound to `Ctrl+D` then; it is `Ctrl+F` from 0.3.5, because `TextArea` claims `Ctrl+D` for delete-right).
 
 > **📖 Documentation in progress** — Extended documentation covering in-depth deployment guides, architecture deep-dives, and operational runbooks for research teams, AI labs, and enterprise users is currently being written and will be published separately. This README serves as the primary reference in the meantime.
 >
@@ -254,7 +257,7 @@ Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) an
 **Compilation:**
 - Generate `memory.md` scaffold from `reasoning.jsonl` (`run_compile`)
 - Open `CompilerApp` for full-screen terminal editing
-- Finalize session (status → `complete`, `FinalizeMemory` IPC) on editor save
+- Finalize session (status → `complete`, `FinalizeMemory` IPC) on explicit `Ctrl+F`
 
 **Remote annotation:**
 - Register annotators via admin CLI or REST API
@@ -567,7 +570,7 @@ If you did not compile from the `AnnotationComplete` overlay, run:
 memory-archive compile --session "$SESSION_ID"
 ```
 
-`CompilerApp` opens with a scaffold of `memory.md` generated from your reasoning. Edit the document to your satisfaction, then press `Ctrl+Q` and save. `FinalizeMemory` IPC is called: session status → `complete`.
+`CompilerApp` opens with a scaffold of `memory.md` generated from your reasoning. Edit the document to your satisfaction, then press `Ctrl+F` and confirm. `FinalizeMemory` IPC is called: session status → `complete`. `Ctrl+Q` is the other exit — it saves the draft and leaves the session at `pending_compilation`, resumable with `memory-archive compile`. Only `Ctrl+F` finalizes.
 
 **Step 10 — View results**
 
@@ -915,7 +918,7 @@ memory-archive annotate --session "$SESSION_ID"
 
 ### `memory-archive compile`
 
-Standalone command to regenerate the `memory.md` scaffold from `reasoning.jsonl` and open `CompilerApp`. Calls `FinalizeMemory` IPC on editor save.
+Standalone command to regenerate the `memory.md` scaffold from `reasoning.jsonl` and open `CompilerApp`. Calls `FinalizeMemory` IPC when the editor is finalized with `Ctrl+F`.
 
 ```
 memory-archive compile [OPTIONS]
@@ -1413,7 +1416,17 @@ An external image viewer can be opened: `feh` on Linux, `open` on macOS, and `os
 
 After annotation is complete (either via `AnnotationComplete` overlay or `memory-archive compile`), `CompilerApp` opens. It is a full-screen terminal text editor built as a `CompilerScreen` Textual widget. On open, `run_compile` generates a `memory.md` scaffold from `reasoning.jsonl`, inserting the step reasoning in document order with headers for each step. The editor supports all standard text editing operations.
 
-`CompilerStatusBar` is displayed at the bottom, showing the current word count and save state (`Saved` / `Unsaved`). Autosave fires every 2.5 seconds when content has changed. On `Ctrl+Q`, the `CompilerQuitOverlay` prompts to save or discard. If the user saves and exits, the `FinalizeMemory` IPC message is sent to `ma-core`, which sets the session status to `complete`. The finalized `memory.md` and all session files remain accessible indefinitely — a completed session is never expired, and is removed only by an explicit `memory-archive session delete`.
+`CompilerStatusBar` is displayed at the bottom, showing the current word count and save state (`Saved` / `Unsaved`). Autosave fires every 2.5 seconds when content has changed.
+
+The two exits are distinct, and only one of them finalizes:
+
+| Key | Overlay | Result |
+|-----|---------|--------|
+| `Ctrl+S` | — | Save the draft, stay in the editor |
+| `Ctrl+F` | `CompilerFinalizeOverlay` | Save, confirm, then `FinalizeMemory` IPC → status `complete` |
+| `Ctrl+Q` | `CompilerQuitOverlay` | Save, confirm, exit; session stays `pending_compilation` and is resumable |
+
+`Ctrl+F` is bound with `priority=True` because the editor is a `TextArea`, whose own bindings are resolved before the screen's — the previous `Ctrl+D` was consumed by `TextArea`'s `delete,ctrl+d` and deleted a character instead of finalizing. The finalized `memory.md` and all session files remain accessible indefinitely — a completed session is never expired, and is removed only by an explicit `memory-archive session delete`.
 
 ### Remote Annotator Mode Behavior
 
