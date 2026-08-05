@@ -3,9 +3,17 @@
 These tests drive real binaries, so they skip rather than fail when the pieces
 are not staged — a developer without the Control-Center releases downloaded
 still gets a clean unit-test run.
+
+That leniency is wrong in CI, where every piece is installed on purpose and a
+missing one is a broken workflow, not a missing convenience. Set
+MA_INTEGRATION_STRICT=1 and an unmet prerequisite fails the run instead of
+skipping it. Without that, this suite reports success having executed nothing:
+the release gate passed green with all 14 tests skipped because the job never
+installed redis-tools, so `redis-cli` was absent and every test was marked skip.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -14,6 +22,11 @@ from pathlib import Path
 import pytest
 
 from harness import CC_BIN_DIR, cc_server_binary, ma_core_binary, reset_registry
+
+
+def strict_mode() -> bool:
+    """True when an unmet prerequisite must fail rather than skip."""
+    return os.environ.get("MA_INTEGRATION_STRICT", "") not in ("", "0", "false")
 
 
 def _redis_available() -> bool:
@@ -26,14 +39,21 @@ def _redis_available() -> bool:
 def pytest_collection_modifyitems(config, items):
     reasons = []
     if not _redis_available():
-        reasons.append("redis is not reachable")
+        reasons.append("redis is not reachable (redis-cli missing or not answering)")
     if ma_core_binary() is None:
         reasons.append("ma-core is not built (cargo build -p ma-core)")
     if shutil.which("memory-archive") is None:
         reasons.append("the memory-archive CLI is not on PATH")
 
     if reasons:
-        skip = pytest.mark.skip(reason="; ".join(reasons))
+        summary = "; ".join(reasons)
+        if strict_mode():
+            raise pytest.UsageError(
+                f"MA_INTEGRATION_STRICT is set but the environment is incomplete: "
+                f"{summary}. Skipping here would report a green compatibility "
+                f"matrix that ran no tests."
+            )
+        skip = pytest.mark.skip(reason=summary)
         for item in items:
             item.add_marker(skip)
 
@@ -54,7 +74,12 @@ def workdir(tmp_path: Path) -> Path:
 def require_cc(version: str) -> Path:
     binary = cc_server_binary(version)
     if binary is None:
-        pytest.skip(f"Control-Center {version} not staged — see integration-tests/README.md")
+        message = f"Control-Center {version} not staged — see integration-tests/README.md"
+        if strict_mode():
+            # Staging is a workflow step in CI; a version missing there means the
+            # download failed, which must not read as a passing matrix.
+            pytest.fail(message, pytrace=False)
+        pytest.skip(message)
     return binary
 
 

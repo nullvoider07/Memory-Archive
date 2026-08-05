@@ -133,9 +133,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install build dependencies
+        # redis-tools supplies redis-cli, which conftest.py uses to decide the
+        # registry is reachable. Without it every test in this job was marked
+        # skip and the matrix reported success having run nothing.
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libssl-dev pkg-config libcurl4-openssl-dev
+          sudo apt-get install -y cmake libssl-dev pkg-config libcurl4-openssl-dev redis-tools
 
       - name: Install protoc
         run: |
@@ -159,4 +162,10 @@ jobs:
         run: bash integration-tests/stage-cc-releases.sh
 
       - name: Compatibility matrix
-        run: python3 -m pytest integration-tests -q
+        # MA_INTEGRATION_STRICT turns an unmet prerequisite into a failure. The
+        # skip-instead-of-fail default exists for developers who have not staged
+        # the Control-Center releases; in CI it hid a gate that ran nothing.
+        # -rs prints the reason for any skip that does survive.
+        env:
+          MA_INTEGRATION_STRICT: '1'
+        run: python3 -m pytest integration-tests -q -rs
