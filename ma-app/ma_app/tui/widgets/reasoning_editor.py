@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
-import shutil
 from typing import ClassVar, Optional
 
 from textual import on
@@ -15,6 +13,7 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Label, TextArea
 
+from ma_app.tui.clipboard import paste_from_os_clipboard
 from ma_app.tui.session_loader import StepState, StepStatus
 
 
@@ -420,95 +419,29 @@ class ReasoningEditor(Widget, can_focus=True):
         except NoMatches:
             pass
     
-    # Clipboard helpers
-    @staticmethod
-    def _clipboard_read() -> str:
-        """Read text from the system clipboard. Returns empty string on failure."""
-        # Try pyperclip first (cross-platform, pip install pyperclip)
-        try:
-            import pyperclip  # type: ignore
-            return pyperclip.paste() or ""
-        except Exception:
-            pass
-
-        # Wayland-native first, then X11 fallback
-        for cmd in (
-            ["wl-paste", "--no-newline"],
-            ["xclip", "-selection", "clipboard", "-o"],
-            ["xsel", "--clipboard", "--output"],
-        ):
-            if shutil.which(cmd[0]):
-                try:
-                    r = subprocess.run(
-                        cmd, capture_output=True, timeout=2,
-                        stdin=subprocess.DEVNULL,
-                    )
-                    if r.returncode == 0:
-                        return r.stdout.decode("utf-8", errors="replace")
-                except Exception:
-                    pass
-
-        # macOS fallback
-        if shutil.which("pbpaste"):
-            try:
-                r = subprocess.run(["pbpaste"], capture_output=True, timeout=2)
-                if r.returncode == 0:
-                    return r.stdout.decode("utf-8", errors="replace")
-            except Exception:
-                pass
-
-        return ""
-
-    @staticmethod
-    def _clipboard_write(text: str) -> None:
-        """Write text to the system clipboard. Silent on failure."""
-        try:
-            import pyperclip  # type: ignore
-            pyperclip.copy(text)
-            return
-        except Exception:
-            pass
-
-        for cmd in (
-            ["wl-copy"],
-            ["xclip", "-selection", "clipboard"],
-            ["xsel", "--clipboard", "--input"],
-        ):
-            if shutil.which(cmd[0]):
-                try:
-                    subprocess.run(
-                        cmd, input=text.encode("utf-8"),
-                        capture_output=True, timeout=2,
-                        stdin=subprocess.PIPE if cmd[0] == "wl-copy" else subprocess.PIPE,
-                    )
-                    return
-                except Exception:
-                    pass
-
-        if shutil.which("pbcopy"):
-            try:
-                subprocess.run(["pbcopy"], input=text.encode("utf-8"),
-                               capture_output=True, timeout=2)
-            except Exception:
-                pass
-
     # Clipboard actions
     def action_copy(self) -> None:
         """Ctrl+C — copy selected text to system clipboard."""
         try:
             ta = self.query_one("#editor-area", TextArea)
-            selected = ta.selected_text
-            if selected:
-                self._clipboard_write(selected)
         except NoMatches:
-            pass
+            return
+        selected = ta.selected_text
+        if selected:
+            # App.copy_to_clipboard, overridden by ClipboardApp, reaches both
+            # OSC 52 and the OS clipboard, and does the latter off the event
+            # loop. Writing to a helper inline here stalled the UI for the
+            # ~64 ms the process took to spawn.
+            self.app.copy_to_clipboard(selected)
 
     def action_paste(self) -> None:
         """Ctrl+V — paste from system clipboard at cursor position."""
         try:
             ta = self.query_one("#editor-area", TextArea)
-            text = self._clipboard_read()
-            if text:
-                ta.insert(text)
         except NoMatches:
-            pass
+            return
+        # Prefer the real OS clipboard so text copied from another application
+        # pastes here; fall back to the in-app clipboard when no helper exists.
+        text = paste_from_os_clipboard() or self.app.clipboard
+        if text:
+            ta.insert(text)

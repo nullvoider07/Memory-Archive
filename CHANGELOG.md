@@ -3,7 +3,7 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.3.4] — 2026-08-04
+## [0.3.4] — 2026-08-05
 
 Five defects found during an annotation and compile pass, plus copy-on-select.
 
@@ -54,16 +54,36 @@ Five defects found during an annotation and compile pass, plus copy-on-select.
 
 ### Added
 
-- **Selecting text with the mouse copies it.** No region of the TUI could be
-  copied. Textual 8.x implements selection and exposes
-  `Screen.get_selected_text()`, but binds nothing to `action_copy_text`, so a
-  selection was made and then dropped. Both apps now handle the `TextSelected`
-  event Textual posts at each mouse release and copy the selection. Delivery
-  goes to two destinations: OSC 52 via `App.copy_to_clipboard` for terminals
-  that support it, and an external helper (`wl-copy`, `xclip`, `xsel`, `pbcopy`,
-  `clip`) for the system clipboard proper, which is what makes the text pastable
-  into other applications. An empty selection — every plain click posts the same
-  event — copies nothing, so clicking never clears the clipboard.
+- **Selecting text with the mouse copies it, in every region of the TUI.** No
+  region could be copied before. A terminal application normally leaves the
+  mouse to the terminal emulator, whose own drag-to-select does the copying;
+  Textual instead asks the terminal for mouse reporting on startup
+  (`SET_ANY_EVENT_MOUSE` and friends, in its driver), which takes selection away
+  from the terminal and makes it the application's problem.
+
+  Textual then implements selection twice, and both models have to be covered:
+
+  - *Screen-level*, for static content — `Screen.selections` is populated on
+    drag and `Screen.get_selected_text()` reads it, but nothing is bound to
+    `action_copy_text`, so a selection was made and then dropped.
+  - *Widget-owned*, for editable content — `TextArea` and `Input` call
+    `capture_mouse()` on mouse-down, and `Screen._forward_event` only opens a
+    screen-level selection while nothing has captured the mouse. Inside the
+    compile editor, the reasoning editor and the jump box the screen therefore
+    records nothing; the text is selected, in that widget's own `selected_text`.
+
+  Both apps now read the screen's selection first and the drag's origin widget
+  second (recorded on mouse-down, because the capture is released before the
+  event arrives and a drag may end over a different widget than it began on).
+
+  Delivery goes to two destinations: OSC 52 via `App.copy_to_clipboard` for
+  terminals that support it, and an external helper (`wl-copy`, `xclip`, `xsel`,
+  `pbcopy`, `clip`) for the system clipboard proper, which is what makes the
+  text pastable into other applications. `App.copy_to_clipboard` is overridden
+  rather than called, so every copy Textual performs internally — Ctrl+C in a
+  `TextArea` or `Input`, and both cut actions — reaches the OS clipboard too.
+  An empty selection — every plain click posts the same event — copies nothing,
+  so clicking never clears the clipboard.
 
   The helper runs on a single coalescing background thread. Spawning it takes
   ~64 ms (114 ms worst case) and the handler runs on the event loop, so an
@@ -71,6 +91,15 @@ Five defects found during an annotation and compile pass, plus copy-on-select.
   is worse still — 300 back-to-back selections left 137 helpers running at once
   and the clipboard holding selection **150** of 299, because concurrent helpers
   finish out of order. One helper at a time, newest text wins.
+
+### Changed
+
+- **The reasoning editor's Ctrl+C and Ctrl+V use the shared clipboard path.**
+  It carried its own copy of the helper lookup, which ran the helper inline on
+  the event loop — the stall that the coalescing worker exists to avoid — and
+  drifted from the version everything else used. Ctrl+V now reads the OS
+  clipboard first and falls back to the in-app clipboard, so text copied in
+  another application pastes into the reasoning field.
 
 ### Security
 

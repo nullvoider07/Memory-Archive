@@ -15,7 +15,9 @@ def finalize_memory(session_id: str, memory_path: Path, console: Console) -> Non
     T4.4 — Mark memory as fully compiled.
 
     1. Update metadata.json status → 'complete'.
-    2. Send FinalizeMemory IPC → Rust sets Redis status → complete + 90-day TTL.
+    2. Send FinalizeMemory IPC → Rust sets Redis status → complete. The record
+       does not expire; 0.3.2 removed the TTLs, which only ever dropped the
+       pointer to a session whose frames were still on disk.
     3. Print the completion message.
 
     Best-effort: metadata and Redis failures are reported but do not raise.

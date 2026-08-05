@@ -11,7 +11,7 @@
 **Developer:** Kartik (NullVoider)
 
 > **✨ What's new in 0.3.4** — five defects found during an annotation and compile pass, plus copy-on-select:
-> - **Selecting text with the mouse copies it.** No region of the TUI could be copied before. The selection goes to the system clipboard as well as OSC 52, so it pastes into other applications, not just back into the TUI. A plain click selects nothing and copies nothing, so clicking never clears a clipboard filled elsewhere. The helper runs on one coalescing background thread: spawning it takes ~64 ms and the handler runs on the event loop, so an inline call would stall the UI on every drag, while a thread per selection let concurrent helpers finish out of order and leave the clipboard holding an *earlier* selection than the one just made.
+> - **Selecting text with the mouse copies it, in every region of the TUI.** No region could be copied before. A terminal application normally leaves the mouse to the terminal, whose own drag-to-select does the copying; Textual asks the terminal for mouse reporting instead, which takes selection away from it and makes it the application's problem — and Textual then implements selection twice. The screen-level model covers static content but records nothing inside `TextArea` and `Input`, which capture the mouse to run their own: the compile editor, the reasoning editor and the jump box, the panes where copying matters most. Both models are now read, screen first, origin widget second. `Ctrl+C` inside an editable region copies too, because `App.copy_to_clipboard` is overridden rather than called and every built-in copy funnels through it. The selection goes to the system clipboard as well as OSC 52, so it pastes into other applications, not just back into the TUI. A plain click selects nothing and copies nothing, so clicking never clears a clipboard filled elsewhere. The helper runs on one coalescing background thread: spawning it takes ~64 ms and the handler runs on the event loop, so an inline call would stall the UI on every drag, while a thread per selection let concurrent helpers finish out of order and leave the clipboard holding an *earlier* selection than the one just made.
 > - **`memory-archive update` can replace a running `ma-core`.** The POSIX path copied the new binary over the destination in place, which Linux refuses with `ETXTBSY` when the target is executing — and `ma-core` normally is, so updating meant stopping the daemon first. The binary is now written to a temp file and renamed over the target; `rename(2)` is permitted and the running process keeps its old inode. The temp file is created with `mkstemp` (O_EXCL, unguessable name, mode 0600) so a pre-planted symlink at a predictable path cannot redirect the write.
 > - **`ma-core` removes its Unix socket on shutdown.** A leftover `ma.sock` reads as a running daemon and has repeatedly misdirected debugging. The socket and PID file are removed only if the PID file still names the exiting process, so a slow shutdown cannot delete the files of an instance that has already taken over.
 > - **Ctrl+N reaches a step it has passed.** Step advancement scanned forward only, so a step left pending behind the cursor — what happens whenever annotation starts part-way through a session — was unreachable by keyboard. At the last step it did nothing at all: no navigation, no completion prompt, no message, and no way to finish the session from the keyboard. The scan now wraps to the start and announces the jump.
@@ -1354,12 +1354,24 @@ current step is the only one left pending it says so rather than doing nothing.
 
 ### Copying text
 
-Selecting any text with the mouse copies it — no copy keystroke. The selection
-goes to the system clipboard (via `wl-copy`, `xclip`, `xsel`, `pbcopy` or
-`clip`, whichever is present) as well as to the terminal via OSC 52, so it can
-be pasted into other applications and not only back into the reasoning editor. A
-plain click selects nothing and copies nothing, so clicking never overwrites a
-clipboard filled elsewhere.
+Selecting text with the mouse copies it — no copy keystroke — anywhere in the
+TUI: static regions such as the step list, stats pane and help overlay, and
+editable ones such as the compile editor, the reasoning editor and the
+jump-to-step box. `Ctrl+C` inside an editable region copies the selection too.
+
+The selection goes to the system clipboard (via `wl-copy`, `xclip`, `xsel`,
+`pbcopy` or `clip`, whichever is present) as well as to the terminal via OSC 52,
+so it can be pasted into other applications and not only back into the reasoning
+editor. `Ctrl+V` in the reasoning editor reads the system clipboard, so text
+copied elsewhere pastes in. A plain click selects nothing and copies nothing, so
+clicking never overwrites a clipboard filled elsewhere.
+
+Editable regions need the second path because Textual implements selection
+twice. `TextArea` and `Input` capture the mouse to run their own drag-selection,
+and the screen-level model Textual exposes through `Screen.get_selected_text()`
+only records a selection while nothing has captured the mouse — so in exactly
+the panes where copying matters most, the screen reports nothing and the text
+lives in the widget's own `selected_text`. Both are read, screen first.
 
 ### Autosave
 
