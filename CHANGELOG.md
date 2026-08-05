@@ -3,7 +3,10 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.3.5] — 2026-08-05
+## [0.3.4] — 2026-08-05
+
+Six defects found during an annotation and compile pass, plus copy-on-select
+working in every region of the TUI.
 
 ### Fixed
 
@@ -28,20 +31,6 @@ adheres to [Semantic Versioning](https://semver.org/).
   non-priority binding on `CompilerScreen` or `AnnotationScreen` may share a key
   with `TextArea` or `Input`, because such a binding can never fire and nothing
   reports that it did not.
-
-### Changed
-
-- **The compile status bar and the README report the finalize key correctly.**
-  The README additionally described finalizing as a side effect of `Ctrl+Q` and
-  saving, in four places, which stopped being true when the explicit finalize
-  was introduced. `Ctrl+Q` saves the draft and leaves the session at
-  `pending_compilation`; only `Ctrl+F` finalizes.
-
-## [0.3.4] — 2026-08-05
-
-Five defects found during an annotation and compile pass, plus copy-on-select.
-
-### Fixed
 
 - **`memory-archive update` can now replace a running `ma-core`.** The POSIX
   branch copied the new binary over the destination in place, which Linux
@@ -128,25 +117,17 @@ Five defects found during an annotation and compile pass, plus copy-on-select.
 
 ### Changed
 
+- **The compile status bar and the README report the finalize key correctly.**
+  The README additionally described finalizing as a side effect of `Ctrl+Q` and
+  saving, in four places, which stopped being true when the explicit finalize
+  was introduced. `Ctrl+Q` saves the draft and leaves the session at
+  `pending_compilation`; only `Ctrl+F` finalizes.
 - **The reasoning editor's Ctrl+C and Ctrl+V use the shared clipboard path.**
   It carried its own copy of the helper lookup, which ran the helper inline on
   the event loop — the stall that the coalescing worker exists to avoid — and
   drifted from the version everything else used. Ctrl+V now reads the OS
   clipboard first and falls back to the in-app clipboard, so text copied in
   another application pastes into the reasoning field.
-
-### Security
-
-- **The updater's temp file can no longer be redirected by a planted symlink.**
-  The binary replacement wrote to a sibling path derived from the process id,
-  and `shutil.copy2` follows symlinks — so anyone able to create a file in the
-  install directory could pre-plant `ma-core.new-<pid>` pointing elsewhere and
-  have the update overwrite that target instead. The temp file is now created
-  with `tempfile.mkstemp` (O_EXCL, unguessable name, mode 0600), and the
-  source's mode is applied afterwards. Demonstrated both ways: the previous
-  shape overwrites the symlink target, the current one leaves it untouched.
-
-### Changed
 
 - The finalize dialog no longer claims a "90-day retention". No session status
   has carried a TTL since 0.3.2; the text was left over from the removed policy.
@@ -172,6 +153,17 @@ Five defects found during an annotation and compile pass, plus copy-on-select.
   `convert`; and `large_enum_variant` on `InboundMessage`, where boxing the
   largest variant would alter the shape serde derives at the protocol boundary
   with ma-app for a value built once per request.
+
+### Security
+
+- **The updater's temp file can no longer be redirected by a planted symlink.**
+  The binary replacement wrote to a sibling path derived from the process id,
+  and `shutil.copy2` follows symlinks — so anyone able to create a file in the
+  install directory could pre-plant `ma-core.new-<pid>` pointing elsewhere and
+  have the update overwrite that target instead. The temp file is now created
+  with `tempfile.mkstemp` (O_EXCL, unguessable name, mode 0600), and the
+  source's mode is applied afterwards. Demonstrated both ways: the previous
+  shape overwrites the symlink target, the current one leaves it untouched.
 
 ### Tests
 
