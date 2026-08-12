@@ -40,8 +40,10 @@ class StepState:
     # Annotation state — populated from reasoning.jsonl on resume.
     status: StepStatus = StepStatus.PENDING
     reasoning: str = ""
-    raw_command: str = ""       # Populated lazily by TUI from raw_input.md
-    converted_command: str = "" # Populated lazily by TUI from converted_input.md
+    # Taken from metadata.json, which is authoritative; the files under commands/
+    # are derived views and only fill these in when metadata carries nothing.
+    raw_command: str = ""
+    converted_command: str = ""
 
     # Set when this step was annotated (None if not yet done).
     timestamp_annotated: Optional[str] = None
@@ -318,6 +320,8 @@ class SessionLoader:
                     marked=bool(entry.get("marked", False)),
                     before_image_path=entry.get("before_image_path"),
                     after_image_path=entry.get("after_image_path"),
+                    raw_command=str(entry.get("raw_command") or ""),
+                    converted_command=str(entry.get("converted_command") or ""),
                 ))
             except (KeyError, TypeError, ValueError) as e:
                 raise LoadError(
@@ -329,10 +333,22 @@ class SessionLoader:
         raw_map = self._read_actuation_commands(memory_dir, [s.step_id for s in steps])
         conv_map = self._read_converted_commands(memory_dir)
 
+        # metadata.json is the authoritative record of a step; the files under
+        # commands/ are derived views of it. Fill from them only where metadata
+        # carries nothing, never over a value it does have.
+        #
+        # The two diverge in practice, and the derived view is the wrong one to
+        # trust. Six drag steps had their origin recovered by hand into
+        # metadata.json without the derived files being regenerated, and
+        # converted_input.md is a markdown table that cannot represent a command
+        # containing '|' — a piped shell command is truncated at the first pipe.
+        # Overwriting metadata with either produced a plausible record of a
+        # different action, which is then written into reasoning.jsonl and
+        # compiled into training data.
         for step in steps:
-            if step.step_id in raw_map:
+            if not step.raw_command and step.step_id in raw_map:
                 step.raw_command = raw_map[step.step_id]
-            if step.step_id in conv_map:
+            if not step.converted_command and step.step_id in conv_map:
                 step.converted_command = conv_map[step.step_id]
 
         return steps
@@ -357,6 +373,38 @@ class SessionLoader:
         except (json.JSONDecodeError, OSError):
             return {}
 
+    @staticmethod
+    def _split_md_row(line: str) -> list[str]:
+        r"""
+        Split a markdown table row on unescaped '|' only, then unescape '\|'.
+
+        A command may legitimately contain a pipe — `Get-ChildItem … | Copy-Item …`
+        is an ordinary terminal step. Splitting on every '|' turns that row into
+        four columns and silently truncates the command at the first pipe, leaving
+        something that still parses as a valid command but does less than the one
+        that ran. ma-core escapes the pipe on write; this reverses it, and also
+        reads correctly the rows written before it did.
+        """
+        cells: list[str] = []
+        buf: list[str] = []
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == "\\" and i + 1 < len(line) and line[i + 1] == "|":
+                buf.append("|")
+                i += 2
+                continue
+            if ch == "|":
+                cells.append("".join(buf).strip())
+                buf = []
+                i += 1
+                continue
+            buf.append(ch)
+            i += 1
+        cells.append("".join(buf).strip())
+        # A well-formed row starts and ends with '|', producing empty outer cells.
+        return cells[1:-1] if len(cells) >= 2 else cells
+
     def _read_converted_commands(self, memory_dir: Path) -> dict[int, str]:
         """
         converted_input.md is a markdown table with columns: Step | Timestamp | Action.
@@ -372,14 +420,16 @@ class SessionLoader:
                 line = line.strip()
                 if not line.startswith("|"):
                     continue
-                cols = [c.strip() for c in line.split("|")[1:-1]]
+                cols = self._split_md_row(line)
                 if len(cols) < 3:
                     continue
                 try:
                     step_id = int(cols[0])
                 except ValueError:
                     continue
-                result[step_id] = cols[2]
+                # An unescaped pipe from a pre-fix capture splits the command
+                # across the trailing cells; rejoin rather than truncate.
+                result[step_id] = " | ".join(c for c in cols[2:] if c)
             return result
         except OSError:
             return {}

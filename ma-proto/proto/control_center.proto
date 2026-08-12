@@ -359,8 +359,17 @@ message CommandEvent {
   // Timing
   string timestamp = 5;           // ISO 8601 with milliseconds e.g. "2026-02-25T12:58:04.286Z"
 
-  // Command — raw input only
-  string raw_command = 6;         // Exactly as typed e.g. "^a", "here left", "type hello"
+  // Command — as reported by the agent, not as entered
+  // NOT the command as entered, despite how it reads. On success this is the
+  // agent's rendered description of what it did — "Left-clicked at X=960, Y=540",
+  // "Typed: hello", "Scrolled down 5 notches at X=770, Y=310" — and it falls back
+  // to the entered command only when the agent errored or returned an empty
+  // message. Matching on it as if it were the typed command matches nothing.
+  //
+  // Its two halves have different provenance: the coordinates are measured, while
+  // the verb phrase is assembled from the caller-supplied human_command and is
+  // never reconciled against the argv that ran.
+  string raw_command = 6;
   string action_type = 7;         // "mouse" / "keyboard" / "position"
   string action_subtype = 8;      // "left", "right", "double", "type", "press" etc.
   bool is_here_command = 9;       // true if command used "here" keyword

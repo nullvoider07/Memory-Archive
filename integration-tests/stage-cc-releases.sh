@@ -31,6 +31,15 @@ fi
 
 mkdir -p "${DEST}"
 
+# Record what this run intended to stage, before any download is attempted.
+# Download failure is deliberately non-fatal here so a developer can stage a
+# subset, but the test matrix derives its parametrisation from what is on disk:
+# without this manifest a failed download silently drops a row (or, when the
+# newest release is the one that fails, silently retargets the provenance test
+# at the previous version) and the suite still reports green. MA_INTEGRATION_STRICT
+# compares the two and fails the run instead.
+printf '%s\n' "${VERSIONS[@]}" > "${DEST}/DISCOVERED"
+
 for version in "${VERSIONS[@]}"; do
     target="${DEST}/${version}/control-center-server"
     if [[ -f "${target}" ]]; then

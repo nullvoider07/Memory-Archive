@@ -23,7 +23,7 @@ pub const SUPPORTED_MIN: Version = Version::new(1, 0, 0);
 
 /// Newest Control-Center this build has been verified against. Raise it only
 /// alongside a run of the compatibility matrix in `integration-tests/`.
-pub const SUPPORTED_MAX: Version = Version::new(1, 2, 2);
+pub const SUPPORTED_MAX: Version = Version::new(1, 3, 0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn every_version_in_the_matrix_is_supported() {
-        for v in ["1.0.0", "1.1.0", "1.2.0", "1.2.1", "1.2.2"] {
+        for v in ["1.0.0", "1.1.0", "1.2.0", "1.2.1", "1.2.2", "1.3.0"] {
             assert!(
                 matches!(evaluate(v, None), Compat::Supported(_)),
                 "{v} is exercised by the compatibility matrix and must pass the gate"
@@ -170,17 +170,17 @@ mod tests {
 
     #[test]
     fn a_newer_release_is_refused_with_an_actionable_message() {
-        let verdict = evaluate("1.3.0", None);
+        let verdict = evaluate("1.4.0", None);
         assert!(matches!(verdict, Compat::TooNew { .. }));
         let msg = verdict.refusal().expect("TooNew must refuse");
-        assert!(msg.contains("1.3.0"));
+        assert!(msg.contains("1.4.0"));
         assert!(msg.contains("control_center_max_version"));
         assert!(msg.contains("memory-archive update"));
     }
 
     #[test]
     fn an_explicit_max_blesses_a_newer_release() {
-        let verdict = evaluate("1.3.0", Version::parse("1.3.0"));
+        let verdict = evaluate("1.4.0", Version::parse("1.4.0"));
         assert!(matches!(verdict, Compat::Supported(_)));
         assert!(verdict.refusal().is_none());
     }
@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn provenance_records_what_the_server_reported() {
         assert_eq!(evaluate("1.2.1", None).recorded(), "1.2.1");
-        assert_eq!(evaluate("1.3.0", None).recorded(), "1.3.0");
+        assert_eq!(evaluate("1.4.0", None).recorded(), "1.4.0");
         assert_eq!(evaluate("weird", None).recorded(), "weird");
     }
 }

@@ -3,6 +3,153 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-08-12
+
+Control-Center 1.3.0 support, and the record fidelity work that goes with it: a
+drag, a modified click and a counted scroll now reach the record as the gesture
+that was performed.
+
+The minor bump is deliberate. Several converted commands change wording, and while
+every changed wording was previously wrong, a consumer that pattern-matched the old
+strings will see different text.
+
+### Added
+
+- **Control-Center 1.3.0 is supported** (`SUPPORTED_MAX`). 1.3.0 adds a modifier
+  grammar for mouse actions (`770 310 ^+left`), drag waypoints, `middle` working on
+  macOS for the first time, and `here drag` reporting its destination.
+- **The converter renders the new grammar.** Waypoint drags record every point in
+  visit order (`Drag from (…) via (…) to (…)`) and replay as a runnable
+  `x y drag via … to …`; modifier prefixes survive into both the record and the
+  replay command; `middle` and `triple` are named; `scroll_left`/`scroll_right` are
+  named rather than falling through.
+- **A version-consistency test** (`ma-app/tests/test_version_consistency.py`). The
+  version is declared in five places, two of them `except ImportError` fallbacks
+  that only take effect when the import fails — the one situation where a stale
+  number would go unnoticed. Editing all five is not the same as them agreeing.
+
+### Fixed
+
+- **A modified click on Windows or Linux recorded as an unmodified click.** `#` is
+  one key under three platform names — the agent names it `Cmd` on macOS, `Win` on
+  Windows and `Super` on Linux — and only `Cmd` was recognised. A Windows
+  `Win+Left-clicked at X=…` failed the name match and the modifier was dropped with
+  no error, writing `Left-click at (770, 310)` for a gesture that was not one. Three
+  related instances of the same root cause went with it: `#` was named from a fixed
+  table in two places that disagreed with each other (`Cmd` on the mouse path,
+  `Super` on the keyboard path) regardless of the reporting OS; a multi-symbol
+  keyboard chord had only its first modifier consumed, so `#+s` read `Super++s`; and
+  the `{Modifier down}` branch renamed `Win` to `Super`. Naming now lives in one
+  per-OS function used by both paths. No captured session is affected — the symbol
+  form appears in none of them, and the recorded name forms are pinned against
+  drift.
+- **A `here drag` recorded its origin instead of its destination**, and the
+  `click` alias recorded as `Performed action at at` — it fell through to the
+  generic arm because only `left` had one. Both now record the gesture performed.
+- **A drag's replay command was the agent's English sentence**, which
+  Control-Center cannot execute. It is now built from the endpoints.
+- **A command containing `|` was truncated at the pipe when read back.**
+  `raw_input.md` and `converted_input.md` are markdown tables delimited by `|`, and
+  a piped shell command contains one — `Get-ChildItem -Filter *invoice* | Copy-Item
+  -Destination found\` is an ordinary terminal step. Written unescaped, the row
+  gained a column, and the annotation TUI's reader split on every `|` and kept the
+  third cell, so the command arrived as `Get-ChildItem -Filter *invoice*`: still a
+  valid command, no longer the one that ran, and no error anywhere. ma-core now
+  escapes `|` and folds newlines when writing a cell, and the reader splits on
+  unescaped delimiters only — including in rows written before the escape existed,
+  so the three sessions already recorded this way read back whole.
+- **The annotation TUI preferred the derived files over `metadata.json`.** The
+  loader read a step's commands from metadata and then overwrote them from
+  `commands/`, which is the derived view, not the record. Six drag steps whose
+  origins were recovered from frames by hand therefore still displayed the
+  misclassified `Hold at (…)`, and a truncated table row displaced the intact
+  metadata value. Since the TUI writes what it holds into `reasoning.jsonl`, which
+  is compiled into training data, either case wrote a plausible record of an action
+  that did not happen. Metadata is now authoritative and the derived files fill
+  gaps only.
+- **The compatibility matrix could shrink silently.** It parametrises over what is
+  staged on disk, and `stage-cc-releases.sh` treats a failed download as a warning;
+  composed, a failed download dropped a test row and the suite still exited 0.
+  Worse, `LATEST` is the newest staged release, so a failure to download the newest
+  one retargeted the provenance test at the previous release and passed — a green
+  matrix that had quietly stopped testing the release about to ship. Staging now
+  records what it discovered and `MA_INTEGRATION_STRICT=1` fails when anything
+  discovered did not stage.
+
+### Security
+
+- **`action_subtype` is client-controlled free text and was rendered straight into
+  a record label** with no length or character bound. It is now capped at 32 bytes
+  and restricted to alphanumerics, `_` and `-`; anything else records as
+  `unknown-action`.
+- **A drag path is bounded at 8 points.** Beyond that the record names the failure
+  and carries no wire data at all — rendering the points that fit would read as a
+  complete record of a shorter gesture, and echoing the agent's sentence would put
+  an unbounded remote string into the record.
+- **A run of modifier symbols in a keyboard command is no longer echoed into the
+  record.** The old path stripped one symbol and passed the remainder through
+  verbatim, so 200,000 leading `#` characters wrote 200,006 bytes into the record;
+  the scan now consumes the whole run and folds it into at most four modifier names,
+  producing 5 bytes for the same input. This narrows the Known issue below rather
+  than closing it — a long payload carrying no modifier symbols is still passed
+  through.
+- `cargo audit`: **0 vulnerabilities.** The allowed-warning count moves from 10 to
+  11 — a newly published advisory against an unchanged dependency, not a dependency
+  change. No third-party crate moved in this release; the only `Cargo.lock` edit is
+  this project's own version.
+
+### Known
+
+- **`raw_command` still reaches `cc_commands.json` unbounded** on the paths that
+  fall back to it — a keyboard `type`/`press`, and a drag reporting no origin. That
+  is unchanged from 0.3.4 and is not introduced here; the bounds added above cover
+  the record label and the drag path. It matters because a capture artefact is
+  training data: an agent that reported a hostile string would put it there. Closing
+  it needs a decision about what a too-long command should replay as, which is a
+  behaviour change rather than a fix.
+- **A step's gesture is asserted by the caller; its position and outcome are
+  measured.** The two halves of a record have different provenance, and the
+  distinction is not visible in the record itself:
+
+  - *Caller-asserted* — everything describing **what gesture was performed**: the
+    verb phrase in `raw_command`, and `action_type` / `action_subtype` /
+    `is_here_command`.
+  - *Execution-derived* — **position and outcome**: the coordinates in the sentence,
+    `mouse_x` / `mouse_y`, `position_captured`, `success`, timing.
+
+  `raw_command` reads as the agent's own report, and it is the agent speaking — but
+  `build_detailed_message` assembles the sentence from the caller-supplied
+  `human_command` (`"Executed: {command}"`, `command.trim_start_matches("type")`, the
+  scroll notch count read out of the command string), wrapping a measured position
+  around a verb taken on faith. `human_command` is required non-empty, carries no
+  length bound, and is never reconciled against the `argv` that ran. So a caller
+  could perform one gesture and label the step another.
+
+  Nothing observed suggests this has happened. It is recorded because the corpus is
+  training data and its provenance should be stated accurately rather than assumed.
+
+  **The fix has a known shape rather than being open-ended:** the agent already ships
+  the validated argv alongside the event as `executed_meta["argv"]`, commented in
+  Control-Center as ground truth for the recorded event, and the held-button tracker
+  already derives from the plan rather than the command string for this exact reason.
+  The classification path simply does not use it. Closing this means having
+  `parse_command_meta` read the plan instead of the string — a Control-Center change,
+  and a behaviour change, since it alters recorded values.
+
+### Notes
+
+- **The existing corpus needs no reconversion, and must not be reconverted.** Every
+  wording that changed was previously wrong, and the common shapes are byte-identical
+  — now enforced by a test rather than by agreement. Separately, six drag steps carry
+  origins recovered from frames by hand, documented in
+  `sft-ablation/DRAG-STEP-ORIGINS.md`; those cannot be regenerated and a reconversion
+  would silently replace them with the destination-only form.
+- **`mouse_x`/`mouse_y` means different things across supported agents** — the
+  destination on macOS and Linux, the origin on Windows through 1.2.2 (a race
+  between the async watcher and a readback verified against the first coordinate),
+  and the destination from 1.3.0. The converter therefore builds a drag from
+  `raw_command` alone. That is a correctness requirement, not a stylistic one.
+
 ## [0.3.4] — 2026-08-05
 
 Six defects found during an annotation and compile pass, plus copy-on-select

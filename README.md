@@ -6,11 +6,18 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.3.4  
+**Version:** 0.4.0  
 **Last Updated:** August 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.3.4** — six defects found during an annotation and compile pass, plus copy-on-select:
+> **✨ What's new in 0.4.0** — Control-Center 1.3.0 support, and the record fidelity work that goes with it:
+> - **Control-Center 1.3.0 is supported**, verified by the compatibility matrix against real 1.0.0 through 1.3.0 server binaries. 1.3.0 adds a modifier grammar for mouse actions (`770 310 ^+left`), drag waypoints, `middle` working on macOS for the first time, and a `here drag` that reports its destination. The `.proto` is untouched, so the wire shape is identical.
+> - **A gesture reaches the record as the gesture that was performed.** A waypoint drag records every point in visit order and replays as a runnable command; modifier prefixes survive into both the record and the replay command; `middle`, `triple`, `scroll_left` and `scroll_right` are named rather than falling through to a generic label. Modifier names now follow the reporting OS — the same `#` key is `Cmd` on macOS, `Win` on Windows and `Super` on Linux — where previously only the macOS name was recognised and a modified click on the other two recorded as a plain one. Previously a `here drag` recorded its origin instead of its destination, the `click` alias recorded as `Performed action at at`, and a drag's replay command was the agent's English sentence, which Control-Center cannot execute.
+> - **Windows drag positions were wrong, and said they were verified.** Control-Center's Windows actuation is asynchronous, and the agent's readback was checked against the *first* coordinate in the command — so a coordinate drag reported its origin as though it were the endpoint, a `here drag` reported the pre-drag position, and both carried `position_captured: true`. Fixed in 1.3.0. Sessions recorded before it are unaffected in storage but their drag positions mean the origin; `actuation_agent_version` is what tells them apart. `mouse_x`/`mouse_y` has always meant the destination on macOS and Linux.
+> - **The compatibility matrix could go green having stopped testing the newest release.** It parameterises over what is staged on disk while the staging script treats a failed download as a warning, so a failed download dropped a test row and the suite still exited 0 — and because the provenance test targets the newest staged release, losing *that* one silently retargeted it at the previous version. Staging now records what it discovered and `MA_INTEGRATION_STRICT=1` fails when anything discovered did not stage.
+> - **`action_subtype` is bounded.** It is client-controlled free text and was rendered straight into a record label with no length or character limit; it is now capped and character-restricted, and a drag path is bounded at eight points with an over-limit marker that carries no wire data at all.
+>
+> Earlier in 0.3.4 — six defects found during an annotation and compile pass, plus copy-on-select:
 > - **`Ctrl+F` finalizes the compiled memory.** `Ctrl+D` never reached the finalize action: Textual resolves a key against the focused widget's bindings before the screen's, and the compile editor is a `TextArea`, which binds `delete,ctrl+d` to delete-right. So the key meant to lock the draft was silently *editing* it — one character per press — and the confirm dialog never opened. `Ctrl+F` is unclaimed by `TextArea`, `Input`, `Button`, `App` and `Screen`, and is bound `priority=True` so a focused editor cannot shadow it. It sits on the screen rather than the App because priority bindings resolve against the top screen's chain, and an App copy would re-fire with the confirm overlay open and stack a second dialog. `Ctrl+Q` still only quits — it saves the draft and leaves the session resumable at `pending_compilation`.
 > - **Selecting text with the mouse copies it, in every region of the TUI.** No region could be copied before. A terminal application normally leaves the mouse to the terminal, whose own drag-to-select does the copying; Textual asks the terminal for mouse reporting instead, which takes selection away from it and makes it the application's problem — and Textual then implements selection twice. The screen-level model covers static content but records nothing inside `TextArea` and `Input`, which capture the mouse to run their own: the compile editor, the reasoning editor and the jump box, the panes where copying matters most. Both models are now read, screen first, origin widget second. `Ctrl+C` inside an editable region copies too, because `App.copy_to_clipboard` is overridden rather than called and every built-in copy funnels through it. The selection goes to the system clipboard as well as OSC 52, so it pastes into other applications, not just back into the TUI. A plain click selects nothing and copies nothing, so clicking never clears a clipboard filled elsewhere. The helper runs on one coalescing background thread: spawning it takes ~64 ms and the handler runs on the event loop, so an inline call would stall the UI on every drag, while a thread per selection let concurrent helpers finish out of order and leave the clipboard holding an *earlier* selection than the one just made.
 > - **`memory-archive update` can replace a running `ma-core`.** The POSIX path copied the new binary over the destination in place, which Linux refuses with `ETXTBSY` when the target is executing — and `ma-core` normally is, so updating meant stopping the daemon first. The binary is now written to a temp file and renamed over the target; `rename(2)` is permitted and the running process keeps its old inode. The temp file is created with `mkstemp` (O_EXCL, unguessable name, mode 0600) so a pre-planted symlink at a predictable path cannot redirect the write.
@@ -194,7 +201,7 @@ Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) an
 - Reconcile sweep: re-queue orphaned `annotating` sessions on `ma-core` restart
 
 **Capture:**
-- Stream CommandEvent messages from Control-Center WatchCommands gRPC endpoint (TLS + `monitor`-scoped token; compatible with Control-Center 1.0.0 through 1.2.0)
+- Stream CommandEvent messages from Control-Center WatchCommands gRPC endpoint (TLS + `monitor`-scoped token; compatible with Control-Center 1.0.0 through 1.3.0)
 - Consume CommandEvent messages from Kafka (cloud_primary mode)
 - Drop position-only events silently (no file write, no step counter increment)
 - Write `raw_input.md`, `converted_input.md`, `actuation_commands.json`, `cc_commands.json` atomically per step
@@ -976,7 +983,7 @@ Check `ma-core` connectivity. Sends a `Ping` IPC message and prints the `ma-core
 
 ```bash
 memory-archive ping
-# → ma-core v0.3.4 — OK
+# → ma-core v0.4.0 — OK
 ```
 
 ---
@@ -1488,14 +1495,15 @@ When `memory-archive annotator claim` is used (remote mode), the TUI starts a da
 
 ### Control-Center Compatibility
 
-Memory Archive supports **Control-Center 1.0.0 through 1.2.2** from a single configuration. Two regimes exist, and the boundary is 1.1.0:
+Memory Archive supports **Control-Center 1.0.0 through 1.3.0** from a single configuration. Two regimes exist, and the boundary is 1.1.0:
 
-| | 1.0.0 | 1.1.0 | 1.2.0 | 1.2.1 | 1.2.2 |
-|---|---|---|---|---|---|
-| TLS on the gRPC listener | not supported | **required** | **required** | **required** | **required** |
-| `monitor` scope on `WatchCommands` | not enforced | **required** | **required** | **required** | **required** |
-| `CommandEvent` wire format | identical | identical | identical | identical | identical |
-| `position_captured` meaning | best-effort readback | best-effort readback | **verified, or `false`** | **verified, or `false`** | **verified, or `false`** |
+| | 1.0.0 | 1.1.0 | 1.2.0 | 1.2.1 | 1.2.2 | 1.3.0 |
+|---|---|---|---|---|---|---|
+| TLS on the gRPC listener | not supported | **required** | **required** | **required** | **required** | **required** |
+| `monitor` scope on `WatchCommands` | not enforced | **required** | **required** | **required** | **required** | **required** |
+| `CommandEvent` wire format | identical | identical | identical | identical | identical | identical |
+| `position_captured` meaning | best-effort readback | best-effort readback | **verified, or `false`** | **verified, or `false`** | **verified, or `false`** | **verified, or `false`** |
+| Windows drag position reports | origin | origin | origin | origin | origin | **destination** |
 
 Every row above is verified against real release binaries by the compatibility suite in `integration-tests/`, which discovers releases from the GitHub API rather than a written-down list.
 

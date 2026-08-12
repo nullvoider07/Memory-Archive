@@ -30,6 +30,28 @@ pub struct CommandWriter {
     converted_header_written: bool,
 }
 
+/// Escape a command for a markdown table cell.
+///
+/// These tables are delimited by `|`, and a command may contain one: a piped
+/// PowerShell or shell command is entirely ordinary in a terminal take. Written
+/// unescaped, the row gains a column and every reader that splits on `|` sees the
+/// command truncated at the first pipe — silently, because what remains is still a
+/// syntactically valid command that simply does less. Three corpus sessions were
+/// recorded that way before this was caught.
+///
+/// A newline would break the row apart the same way, so it is folded to a space.
+fn md_cell(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '|' => out.push_str("\\|"),
+            '\n' | '\r' => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 impl CommandWriter {
     pub fn new(
         memory_dir: &Path,
@@ -170,7 +192,7 @@ impl CommandWriter {
         let failed_prefix = if !event.success { "[FAILED] " } else { "" };
         self.raw_input_buf.push_str(&format!(
             "| {:>4} | {} | {}{} |\n",
-            step, event.timestamp, failed_prefix, event.raw_command
+            step, event.timestamp, failed_prefix, md_cell(&event.raw_command)
         ));
     }
 
@@ -187,7 +209,7 @@ impl CommandWriter {
         let failed_prefix = if !event.success { "[FAILED] " } else { "" };
         self.converted_input_buf.push_str(&format!(
             "| {:>4} | {} | {}{} |\n",
-            step, event.timestamp, failed_prefix, converted
+            step, event.timestamp, failed_prefix, md_cell(converted)
         ));
     }
 
@@ -256,7 +278,7 @@ impl CommandWriter {
         let failed_prefix = if !event.success { "[FAILED] " } else { "" };
         let line = format!(
             "| {:>4} | {} | {}{} |\n",
-            step, event.timestamp, failed_prefix, event.raw_command
+            step, event.timestamp, failed_prefix, md_cell(&event.raw_command)
         );
         self.append_line(&path, &line)
             .context("Failed to append to raw_input.md")
@@ -272,7 +294,7 @@ impl CommandWriter {
         let failed_prefix = if !event.success { "[FAILED] " } else { "" };
         let line = format!(
             "| {:>4} | {} | {}{} |\n",
-            step, event.timestamp, failed_prefix, converted
+            step, event.timestamp, failed_prefix, md_cell(converted)
         );
         self.append_line(&path, &line)
             .context("Failed to append to converted_input.md")
@@ -384,5 +406,51 @@ impl CommandWriter {
 
         file.write_all(line.as_bytes())
             .with_context(|| format!("Failed to write line to: {}", path.display()))
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::md_cell;
+
+    // A markdown table is delimited by '|', and a piped shell command contains one.
+    // Unescaped, the row gains a column and every reader that splits on '|' sees the
+    // command cut at the first pipe — silently, because the remainder still parses as
+    // a valid command that simply does less. Three corpus sessions hold such a row.
+    #[test]
+    fn a_piped_command_cannot_gain_a_column() {
+        let cmd = r"Get-ChildItem -Filter *invoice* | Copy-Item -Destination found\";
+        let cell = md_cell(cmd);
+
+        assert_eq!(
+            cell,
+            r"Get-ChildItem -Filter *invoice* \| Copy-Item -Destination found\"
+        );
+
+        // The row must still read as exactly three cells.
+        let row = format!("| {:>4} | {} | {} |\n", 2, "2026-07-30T06:26:09.953Z", cell);
+        let unescaped_delimiters = row
+            .trim()
+            .char_indices()
+            .filter(|(i, c)| *c == '|' && (*i == 0 || !row[..*i].ends_with('\\')))
+            .count();
+        assert_eq!(unescaped_delimiters, 4, "row: {row:?}");
+    }
+
+    #[test]
+    fn a_newline_cannot_break_the_row_apart() {
+        assert_eq!(md_cell("first\nsecond"), "first second");
+        assert_eq!(md_cell("crlf\r\nhere"), "crlf  here");
+    }
+
+    #[test]
+    fn ordinary_commands_are_untouched() {
+        for cmd in [
+            "Left-click at (619, 1025)",
+            "Type: corpus-seed",
+            "Drag from (344, 221) to (1393, 810)",
+            "Press: Cmd+K",
+        ] {
+            assert_eq!(md_cell(cmd), cmd, "must not rewrite: {cmd}");
+        }
     }
 }
