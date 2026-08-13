@@ -3,15 +3,24 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.4.0] — 2026-08-12
+## [0.4.0] — 2026-08-13
 
 Control-Center 1.3.0 support, and the record fidelity work that goes with it: a
 drag, a modified click and a counted scroll now reach the record as the gesture
-that was performed.
+that was performed — and the annotation TUI displays that record rather than a
+derived view of it.
 
 The minor bump is deliberate. Several converted commands change wording, and while
 every changed wording was previously wrong, a consumer that pattern-matched the old
 strings will see different text.
+
+**This release was cut twice.** The first cut was withdrawn the day it was tagged:
+it made `SessionLoader` authoritative over the derived command files but left a
+second parser in `step_list.py` reading them, so the pane an annotator actually
+reads went on showing the superseded text the fix was written to remove. The tag,
+the release and its workflow runs were deleted; commit `a3082fe` remains on
+`master` and carries the incomplete fix. Build from this release, not from that
+commit.
 
 ### Added
 
@@ -29,6 +38,42 @@ strings will see different text.
   number would go unnoticed. Editing all five is not the same as them agreeing.
 
 ### Fixed
+
+- **The annotation step list read the derived file directly, so the pane the
+  annotator reads kept showing superseded and truncated commands.** Making
+  `SessionLoader` authoritative over `commands/converted_input.md` fixed the value
+  the TUI *saves*, but `step_list.py` carried its own parser
+  (`load_converted_titles`) and read that file a second time to build the visible
+  row titles. Both defects therefore survived where they were most visible: the six
+  drag steps whose origins were recovered by hand still displayed
+  `Hold at (1393, 810)` for what metadata recorded as
+  `Drag from (344, 221) to (1393, 810)`, and the parser split on every `|` and kept
+  column 2, so a piped PowerShell command displayed truncated at the first pipe.
+  Nine steps across the recorded corpus displayed wrongly; all nine now render the
+  loader's value. Row titles come from `StepState` and are read at render time, so
+  a row cannot hold a value the loader has since resolved differently, and the
+  second parser is gone rather than repaired — a derived view is a projection,
+  never an input.
+
+  Nothing already written was wrong: the save path always used `StepState`. The
+  harm was that an annotator reasons from what is displayed, so a wrong label
+  produces a correct-looking annotation of an action that never happened.
+
+- **`[FAILED] ` could reach a step's command.** The prefix is added by ma-core when
+  rendering a failed step into the markdown tables — it describes the outcome, not
+  the command. The step list stripped it for display; the loader did not, so a
+  gap-filled value carried it into `StepState` and from there into
+  `reasoning.jsonl`. Not reachable in the recorded corpus, which has zero failed
+  actuations, but the same inversion: a rendering artifact leaking into the record.
+
+- **A length mismatch in `actuation_commands.json` silently misaligned commands.**
+  That file has no `step_id`; entry N is step N. The reader mapped positionally
+  with `if i < len(data)`, so a shorter or longer file attached one step's command
+  to another — a plausible, wrong record rather than a visible failure. It now
+  refuses to map unless the two sequences line up exactly. Verified against all 101
+  recorded sessions: entry counts match step counts everywhere and no heartbeat is
+  ever stored, so the assumption holds today; it is now asserted rather than
+  assumed.
 
 - **A modified click on Windows or Linux recorded as an unmodified click.** `#` is
   one key under three platform names — the agent names it `Cmd` on macOS, `Win` on

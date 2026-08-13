@@ -128,3 +128,50 @@ def test_an_unescaped_pipe_from_an_old_capture_is_not_truncated(tmp_path: Path) 
 )
 def test_split_md_row_handles_escapes(row: str, expected: list[str]) -> None:
     assert SessionLoader._split_md_row(row) == expected
+
+
+def test_the_failed_prefix_is_not_carried_into_the_record(tmp_path: Path) -> None:
+    """`[FAILED] ` renders a step's outcome; it is not part of the command.
+
+    The step list stripped it for display while the loader did not, so a
+    gap-filled value could reach `reasoning.jsonl` — and the training data — as
+    though the agent had reported the prefix as part of what it ran.
+    """
+    d = _session(
+        tmp_path,
+        [_step(4, action_subtype="left")],
+        ["|    4 | 2026-07-15T11:43:07.825Z | [FAILED] Left-click at (504, 948) |"],
+    )
+    assert _load(d)[4].converted_command == "Left-click at (504, 948)"
+
+
+def _with_actuation(d: Path, entries: list[dict]) -> Path:
+    (d / "commands" / "actuation_commands.json").write_text(
+        json.dumps(entries), encoding="utf-8"
+    )
+    return d
+
+
+def test_actuation_gap_fill_when_the_positions_line_up(tmp_path: Path) -> None:
+    d = _with_actuation(
+        _session(tmp_path, [_step(1), _step(2)], []),
+        [{"raw_command": "one"}, {"raw_command": "two"}],
+    )
+    loaded = _load(d)
+    assert loaded[1].raw_command == "one"
+    assert loaded[2].raw_command == "two"
+
+
+def test_a_length_mismatch_refuses_to_map_rather_than_misalign(tmp_path: Path) -> None:
+    """actuation_commands.json is positional — entry N is step N.
+
+    If the sequences differ in length the mapping has broken, and entry N belongs
+    to some other step. Attaching it would give a step a plausible, wrong command;
+    an empty field is recoverable, a confident wrong one is not.
+    """
+    d = _with_actuation(
+        _session(tmp_path, [_step(1), _step(2), _step(3)], []),
+        [{"raw_command": "one"}, {"raw_command": "two"}],
+    )
+    loaded = _load(d)
+    assert all(loaded[i].raw_command == "" for i in (1, 2, 3))

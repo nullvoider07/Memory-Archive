@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
 from typing import ClassVar
 from textual import on
 from textual.app import ComposeResult
@@ -16,40 +14,20 @@ from textual.widget import Widget
 from textual.widgets import Label, Static
 from ma_app.tui.session_loader import SessionState, StepState, StepStatus
 
-# converted_input.md parser
-def load_converted_titles(memory_dir: Path) -> dict[int, str]:
-    """
-    Parse converted_input.md and return a {step_id: title} mapping.
-
-    Each data row has the format:
-        |    1 | 2026-02-25T12:58:04.286Z | Click at (960, 540) |
-
-    Header rows (# ..., | Step |, |----) are skipped.
-    Returns an empty dict if the file does not exist.
-    """
-    path = memory_dir / "commands" / "converted_input.md"
-    if not path.exists():
-        return {}
-
-    titles: dict[int, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        # Only process pipe-delimited data rows with at least 3 columns.
-        if not line.startswith("|") or line.startswith("|---") or "Step" in line[:20]:
-            continue
-        cols = [c.strip() for c in line.strip("|").split("|")]
-        if len(cols) < 3:
-            continue
-        try:
-            step_id = int(cols[0])
-            title = cols[2]  # Action column
-            # Strip [FAILED] prefix — the status icon already conveys failure.
-            title = re.sub(r"^\[FAILED\]\s*", "", title)
-            titles[step_id] = title
-        except (ValueError, IndexError):
-            continue
-
-    return titles
+# Row titles come from StepState, never from a derived file.
+#
+# This widget used to parse commands/converted_input.md itself, in parallel with
+# SessionLoader. That made the visible step list a second reader of a derived
+# view, with two consequences: a step whose command was corrected in
+# metadata.json still displayed the superseded text (the six hand-corrected drag
+# origins read "Hold at (x, y)" here long after metadata carried
+# "Drag from (…) to (…)"), and a command containing a pipe was truncated at the
+# first one, because the parser split every '|' and kept column 2.
+#
+# The loader already resolves both: metadata.json is authoritative and the
+# derived file only fills a field metadata leaves empty, parsed with an
+# escape-aware splitter. Reading the file again here could only disagree with it.
+# The rule this restores: a derived view is a projection, never an input.
 
 # Status icon helpers
 _STATUS_ICONS: dict[StepStatus, str] = {
@@ -110,17 +88,28 @@ class StepRow(Widget, can_focus=True):
     # True when the accordion is open.
     expanded: reactive[bool] = reactive(False)
 
-    def __init__(self, step: StepState, title: str, index: int) -> None:
+    def __init__(self, step: StepState, index: int) -> None:
         super().__init__(id=f"step-row-{step.step_id}")
         self.step = step
-        self.title = title
         self.index = index  # 0-based position in the list
+
+    def _title(self) -> str:
+        """
+        The row's label text, always read from the step at render time.
+
+        Held as a lookup rather than a captured string so a row cannot keep
+        displaying a value the loader has since resolved differently.
+        """
+        return (
+            self.step.converted_command
+            or f"{self.step.action_type} / {self.step.action_subtype}"
+        )
 
     def compose(self) -> ComposeResult:
         icon = _STATUS_ICONS[self.step.status]
         color = _STATUS_COLORS[self.step.status]
         num = f"{self.step.step_id:>4}"
-        title = self.title or f"{self.step.action_type} / {self.step.action_subtype}"
+        title = self._title()
         yield Label(
             f"[{color}]{icon}[/{color}] {num}  {title}",
             id="row-label",
@@ -149,7 +138,7 @@ class StepRow(Widget, can_focus=True):
         icon = _STATUS_ICONS[self.step.status]
         color = _STATUS_COLORS[self.step.status]
         num = f"{self.step.step_id:>4}"
-        title = self.title or f"{self.step.action_type} / {self.step.action_subtype}"
+        title = self._title()
         try:
             self.query_one("#row-label", Label).update(
                 f"[{color}]{icon}[/{color}] {num}  {title}"
@@ -241,20 +230,15 @@ class StepList(Widget, can_focus=True):
     def __init__(self, session_data: SessionState) -> None:
         super().__init__()
         self._session_data = session_data
-        self._titles: dict[int, str] = {}
         self._rows: list[StepRow] = []
         # 0-based index of the currently selected row.
         self._cursor: int = session_data.cursor_step
 
     def compose(self) -> ComposeResult:
-        # Load titles from converted_input.md once on compose.
-        self._titles = load_converted_titles(self._session_data.memory_dir)
-
         self._rows = []
         with VerticalScroll(id="steps-scroll"):
             for i, step in enumerate(self._session_data.steps):
-                title = self._titles.get(step.step_id, "")
-                row = StepRow(step, title, i)
+                row = StepRow(step, i)
                 self._rows.append(row)
                 yield row
 

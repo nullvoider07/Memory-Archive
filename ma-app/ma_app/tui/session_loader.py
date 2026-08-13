@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 from ma_app.ipc.client import IPCClient, IPCError
+
+# "[FAILED] " is prepended by ma-core when it renders a failed step into the
+# raw/converted markdown tables. It describes the outcome, not the command.
+_FAILED_PREFIX_RE = re.compile(r"^\[FAILED\]\s*")
 
 if TYPE_CHECKING:
     from ma_app.storage.remote_fetch import RemoteFetcher
@@ -365,12 +370,19 @@ class SessionLoader:
             return {}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            # The positional mapping is only sound while the two sequences line
+            # up one-for-one. If they do not, entry N is some other step's
+            # command, and filling a gap from it would attach a plausible,
+            # wrong command to a step — worse than leaving the field empty.
+            # Heartbeats are filtered before the file is written, so a length
+            # difference means an assumption has broken; refuse rather than guess.
+            if not isinstance(data, list) or len(data) != len(step_ids_ordered):
+                return {}
             return {
                 step_id: data[i].get("raw_command", "")
                 for i, step_id in enumerate(step_ids_ordered)
-                if i < len(data)
             }
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, AttributeError):
             return {}
 
     @staticmethod
@@ -429,7 +441,13 @@ class SessionLoader:
                     continue
                 # An unescaped pipe from a pre-fix capture splits the command
                 # across the trailing cells; rejoin rather than truncate.
-                result[step_id] = " | ".join(c for c in cols[2:] if c)
+                action = " | ".join(c for c in cols[2:] if c)
+                # "[FAILED] " is a rendering artifact of this table, not part of
+                # the command. It must not survive into StepState, because the
+                # gap-filled value is what reasoning_writer persists — a command
+                # carrying a status prefix would reach the training data as
+                # though the agent had reported it.
+                result[step_id] = _FAILED_PREFIX_RE.sub("", action)
             return result
         except OSError:
             return {}
