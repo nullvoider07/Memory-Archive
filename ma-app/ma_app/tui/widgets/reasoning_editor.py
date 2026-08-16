@@ -13,7 +13,7 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Label, TextArea
 
-from ma_app.tui.clipboard import paste_from_os_clipboard
+from ma_app.tui.clipboard import paste_into
 from ma_app.tui.session_loader import StepState, StepStatus
 
 
@@ -42,8 +42,17 @@ class ReasoningEditor(Widget, can_focus=True):
         Ctrl+S   — save current step (posts StepSaved)
         Ctrl+N   — save + complete step (posts StepCompleted);
                    if empty: first press shows skip hint, second press posts StepSkipped
+        Ctrl+A   — select all
+        Ctrl+C   — copy selection to the system clipboard
+        Ctrl+V   — paste the system clipboard over the selection
+        Ctrl+X   — cut selection to the system clipboard
         Ctrl+Z   — TextArea native undo
         Ctrl+Y   — TextArea native redo
+
+    Every entry above is bound on this widget, not just on the inner TextArea.
+    The outer widget is focusable (Tab cycles to it), and a key handled only by
+    TextArea's own bindings does nothing in that state — which is what Ctrl+X,
+    Ctrl+Z and Ctrl+Y silently did while this list claimed otherwise.
 
     The `u` keybinding (revert to last saved) is intentionally NOT handled here.
     It is bound at AnnotationScreen level so it only fires when the TextArea does
@@ -61,6 +70,9 @@ class ReasoningEditor(Widget, can_focus=True):
         Binding("ctrl+a", "select_all", "Select All", show=False, priority=True),
         Binding("ctrl+c", "copy", "Copy", show=False, priority=True),
         Binding("ctrl+v", "paste", "Paste", show=False, priority=True),
+        Binding("ctrl+x", "cut", "Cut", show=False, priority=True),
+        Binding("ctrl+z", "undo", "Undo", show=False, priority=True),
+        Binding("ctrl+y", "redo", "Redo", show=False, priority=True),
     ]
 
     DEFAULT_CSS = """
@@ -179,10 +191,10 @@ class ReasoningEditor(Widget, can_focus=True):
     def _autosave(self) -> None:
         if self._current_step is None:
             return
-        current = self._get_text()
-        saved   = self._saved_text.get(self._current_step.step_id, "")
-        if current != saved:
-            self.post_message(self.StepSaved(self._current_step.step_id, current.strip()))
+        if self._is_dirty():
+            self.post_message(
+                self.StepSaved(self._current_step.step_id, self._get_text().strip())
+            )
 
     # Public API (called by AnnotationScreen)
     def load_step(self, step: StepState) -> None:
@@ -221,11 +233,23 @@ class ReasoningEditor(Widget, can_focus=True):
         Used by AnnotationScreen.action_quit() to decide whether to show the
         unsaved-changes confirmation prompt.
         """
+        return self._is_dirty()
+
+    def _is_dirty(self) -> bool:
+        """
+        Return True if the editor holds text that differs from what was saved.
+
+        Compared stripped on both sides because only the stripped text is ever
+        persisted: action_save and action_next post StepSaved/StepCompleted with
+        text.strip(), and AnnotationScreen feeds that same stripped string back
+        through mark_saved. Comparing the raw buffer against it made any
+        annotation ending in a newline permanently dirty — autosave rewrote
+        reasoning.jsonl every 2.5 s and quitting always claimed unsaved changes.
+        """
         if self._current_step is None:
             return False
-        current = self._get_text()
-        saved   = self._saved_text.get(self._current_step.step_id, "")
-        return current != saved
+        saved = self._saved_text.get(self._current_step.step_id, "")
+        return self._get_text().strip() != saved.strip()
 
     def mark_saved(self, step_id: int, reasoning: str) -> None:
         """
@@ -435,13 +459,35 @@ class ReasoningEditor(Widget, can_focus=True):
             self.app.copy_to_clipboard(selected)
 
     def action_paste(self) -> None:
-        """Ctrl+V — paste from system clipboard at cursor position."""
+        """Ctrl+V — paste from system clipboard, replacing any selection."""
         try:
             ta = self.query_one("#editor-area", TextArea)
         except NoMatches:
             return
         # Prefer the real OS clipboard so text copied from another application
         # pastes here; fall back to the in-app clipboard when no helper exists.
-        text = paste_from_os_clipboard() or self.app.clipboard
-        if text:
-            ta.insert(text)
+        paste_into(ta, self.app.clipboard)
+
+    # Delegated TextArea actions. These exist because the outer ReasoningEditor
+    # is focusable in its own right (Tab cycles to it), and a binding declared
+    # here is the only thing that reaches the inner TextArea when the outer
+    # widget holds focus. Cut, undo and redo were documented as working in that
+    # state but were not bound, so they silently did nothing.
+    def action_cut(self) -> None:
+        """Ctrl+X — cut the selection to the system clipboard."""
+        self._delegate("action_cut")
+
+    def action_undo(self) -> None:
+        """Ctrl+Z — TextArea native undo."""
+        self._delegate("action_undo")
+
+    def action_redo(self) -> None:
+        """Ctrl+Y — TextArea native redo."""
+        self._delegate("action_redo")
+
+    def _delegate(self, action: str) -> None:
+        try:
+            ta = self.query_one("#editor-area", TextArea)
+        except NoMatches:
+            return
+        getattr(ta, action)()

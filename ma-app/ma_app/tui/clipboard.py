@@ -13,6 +13,7 @@ from textual import events
 from textual.app import App, ScreenStackError
 from textual.errors import NoWidget
 from textual.widget import Widget
+from textual.widgets import TextArea
 
 _log = logging.getLogger(__name__)
 
@@ -120,6 +121,38 @@ def copy_to_os_clipboard(text: str) -> bool:
     except (OSError, subprocess.SubprocessError) as exc:
         _log.debug("OS clipboard helper %s failed: %s", argv[0], exc)
         return False
+
+
+def paste_into(text_area: TextArea, fallback: str = "") -> bool:
+    """
+    Paste the OS clipboard into a TextArea, replacing any active selection.
+
+    Both editors need the same two things, and each got one of them wrong on its
+    own. TextArea.action_paste reads App.clipboard, which only ever holds what
+    was copied inside the TUI, so text copied from another application had
+    nowhere to land; the reasoning editor's override fixed the source but called
+    insert(), which writes at cursor_location and leaves the selection in place,
+    so Ctrl+A then Ctrl+V appended instead of replacing.
+
+    replace() over the selection range is what TextArea.action_paste and its
+    bracketed-paste handler both do. Edit sorts the range internally, so a
+    right-to-left drag selection is handled, and an empty selection degrades to
+    an insert at the cursor.
+
+    `fallback` is App.clipboard, used when no OS helper is installed.
+
+    Returns True if the document was changed.
+    """
+    if text_area.read_only:
+        return False
+    text = paste_from_os_clipboard() or fallback
+    if not text:
+        return False
+    result = text_area.replace(
+        text, *text_area.selection, maintain_selection_offset=False
+    )
+    text_area.move_cursor(result.end_location)
+    return True
 
 
 class _ClipboardWorker:

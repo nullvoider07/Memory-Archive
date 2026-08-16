@@ -13,6 +13,7 @@ from textual.widgets import Button, Label, TextArea
 from textual.css.query import NoMatches
 from textual.widget import Widget
 
+from ma_app.tui.clipboard import paste_into
 from ma_app.tui.widgets.button_nav import ButtonNavModal, hint_label
 
 
@@ -218,10 +219,19 @@ class CompilerScreen(Screen):
     # Priority bindings are resolved against the *top* screen's binding chain,
     # which is the confirm overlay while it is open — so this cannot re-fire and
     # stack a second dialog. Keep it on the screen, not the App, for that reason.
+    #
+    # Ctrl+A and Ctrl+V are priority for the same reason and must stay that way:
+    # TextArea binds ctrl+a to cursor_line_start and ctrl+v to a paste that reads
+    # App.clipboard only, and the focused widget's own bindings are dispatched
+    # first. Without priority the overrides below would never run. Both match the
+    # reasoning editor, so the same keystroke means the same thing in both
+    # editors; TextArea's select-all on f6/f7 is left alone.
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("ctrl+s", "save",        "Save",     show=False),
-        Binding("ctrl+f", "finalize",    "Finalize", show=False, priority=True),
-        Binding("ctrl+q", "quit_editor", "Quit",     show=False),
+        Binding("ctrl+s", "save",        "Save",       show=False),
+        Binding("ctrl+f", "finalize",    "Finalize",   show=False, priority=True),
+        Binding("ctrl+q", "quit_editor", "Quit",       show=False),
+        Binding("ctrl+a", "select_all",  "Select All", show=False, priority=True),
+        Binding("ctrl+v", "paste",       "Paste",      show=False, priority=True),
     ]
 
     DEFAULT_CSS = """
@@ -280,6 +290,21 @@ class CompilerScreen(Screen):
 
     def action_save(self) -> None:
         self._do_save()
+
+    def action_select_all(self) -> None:
+        try:
+            self.query_one("#memory-editor", TextArea).select_all()
+        except NoMatches:
+            pass
+
+    def action_paste(self) -> None:
+        # Shares the reasoning editor's helper: the OS clipboard is the source,
+        # and an active selection is replaced rather than pasted beside.
+        try:
+            editor = self.query_one("#memory-editor", TextArea)
+        except NoMatches:
+            return
+        paste_into(editor, self.app.clipboard)
 
     def action_finalize(self) -> None:
         # Persist the current buffer, then confirm before finalizing — finalizing

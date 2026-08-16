@@ -27,8 +27,14 @@ _SECTIONS: list[tuple[str, str]] = [
     ("Ctrl+N",                  "Save + advance to next step"),
     ("Ctrl+N  (2×, empty)",     "Skip step"),
     ("Ctrl+Z  /  Ctrl+Y",       "Undo / Redo"),
-    ("u",                       "Revert to last saved (when list focused)"),
-    ("Space",                   "Expand / collapse step dropdown"),
+    ("u",                       "Revert to last saved (in list)"),
+    ("Space",                   "Expand / collapse step detail"),
+    # Clipboard
+    ("CLIPBOARD",               ""),
+    ("Drag",                    "Select text, copies on release"),
+    ("Ctrl+A",                  "Select all"),
+    ("Ctrl+C  /  Ctrl+X",       "Copy / Cut to system clipboard"),
+    ("Ctrl+V",                  "Paste, replacing the selection"),
     # Image pane
     ("IMAGE",                   ""),
     ("+  /  =",                 "Zoom in"),

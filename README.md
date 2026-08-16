@@ -6,11 +6,17 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.4.0  
+**Version:** 0.4.1  
 **Last Updated:** August 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.4.0** — Control-Center 1.3.0 support, and the record fidelity work that goes with it:
+> **✨ What's new in 0.4.1** — editor fixes found while annotating. No wire, storage or CLI change; a session recorded or annotated by 0.4.0 is read identically.
+> - **Pasting over selected text replaces it.** `Ctrl+A` then `Ctrl+V` in the reasoning editor left the selection in place and inserted the clipboard immediately after it, with no separator — the opposite of what select-all-and-paste means everywhere else, and the exact operation an annotator performs to replace a draft. The override inserted at the cursor rather than replacing the selection range, and after select-all the cursor sits at the end of the document. A right-to-left drag selection is handled, an empty selection still inserts at the cursor, and the cursor now follows the pasted text.
+> - **The compile editor reaches the system clipboard.** It had no paste binding of its own, so `Ctrl+V` fell through to Textual's, which reads the in-app clipboard and nothing else: text copied anywhere outside the TUI had nowhere to land in `memory.md`, the document the compile step exists to produce. Both editors now share one paste path, so the source and the selection-replacement semantics cannot drift apart again. `Ctrl+A` also means select-all in both — `TextArea` binds it to cursor-to-line-start, which only the reasoning editor had overridden.
+> - **Cut, undo and redo work when the reasoning editor is reached by `Tab`.** The outer editor widget is focusable in its own right, and only keys bound on it reach the inner text area in that state. `Ctrl+A`, `Ctrl+C` and `Ctrl+V` were bound there; `Ctrl+X`, `Ctrl+Z` and `Ctrl+Y` were not — while the widget's own documentation listed all of them as working regardless of which half held focus.
+> - **An annotation ending in a newline no longer leaves its step permanently unsaved.** Saving persists `text.strip()` and stores that as the baseline, but the dirty check compared it against the raw buffer, so one `Enter` at the end of a paragraph never matched: autosave rewrote `reasoning.jsonl` and fired an IPC progress notification every 2.5 seconds for the rest of the session, and quitting always claimed unsaved changes. Nothing was written wrongly — the repeated writes were idempotent — but a confirmation prompt that fires every time teaches an annotator to dismiss it unread.
+>
+> Earlier in 0.4.0 — Control-Center 1.3.0 support, and the record fidelity work that goes with it:
 > - **Control-Center 1.3.0 is supported**, verified by the compatibility matrix against real 1.0.0 through 1.3.0 server binaries. 1.3.0 adds a modifier grammar for mouse actions (`770 310 ^+left`), drag waypoints, `middle` working on macOS for the first time, and a `here drag` that reports its destination. The `.proto` is untouched, so the wire shape is identical.
 > - **A gesture reaches the record as the gesture that was performed.** A waypoint drag records every point in visit order and replays as a runnable command; modifier prefixes survive into both the record and the replay command; `middle`, `triple`, `scroll_left` and `scroll_right` are named rather than falling through to a generic label. Modifier names now follow the reporting OS — the same `#` key is `Cmd` on macOS, `Win` on Windows and `Super` on Linux — where previously only the macOS name was recognised and a modified click on the other two recorded as a plain one. Previously a `here drag` recorded its origin instead of its destination, the `click` alias recorded as `Performed action at at`, and a drag's replay command was the agent's English sentence, which Control-Center cannot execute.
 > - **The annotation TUI shows the record, not a derived view of it.** `metadata.json` is a session's record; `commands/raw_input.md`, `converted_input.md` and `actuation_commands.json` are projections of it written for reading, and they diverge from it two ways — they go stale when a value is corrected in metadata after the fact, and a markdown table delimited by `|` cannot hold a piped shell command without escaping. The loader read metadata and then overwrote it from those files, and `step_list.py` carried a *second* parser that read them again to build the visible row titles. So a drag whose origin was recovered by hand still displayed `Hold at (1393, 810)` for what metadata recorded as `Drag from (344, 221) to (1393, 810)`, and `Get-ChildItem -Filter *invoice* | Copy-Item -Destination found\` displayed cut at the pipe: still a valid command, no longer the one that ran, and no error anywhere. Metadata is now authoritative, the second parser is gone rather than repaired, ma-core escapes `|` and folds newlines when writing a cell, and the reader splits on unescaped delimiters only — so rows written before the escape existed read back whole. `[FAILED] ` is stripped where it was leaking into a step's command, and positional mapping from `actuation_commands.json` now refuses on a length mismatch instead of attaching one step's command to another. Nothing already written was wrong — the save path always used `StepState` — but an annotator reasons from what is displayed, and a wrong label produces a correct-looking annotation of an action that never happened.
@@ -984,7 +990,7 @@ Check `ma-core` connectivity. Sends a `Ping` IPC message and prints the `ma-core
 
 ```bash
 memory-archive ping
-# → ma-core v0.4.0 — OK
+# → ma-core v0.4.1 — OK
 ```
 
 ---
@@ -1343,6 +1349,10 @@ The image pane (top-left) shows the at-frame for the selected step along with it
 | `Space` | Toggle step accordion (expand/collapse) |
 | `Ctrl+N` | Save current reasoning, mark step complete, advance to the next pending step |
 | `Ctrl+S` | Save current reasoning without advancing |
+| `Ctrl+A` | Select all text in the reasoning editor |
+| `Ctrl+C` | Copy the selection to the system clipboard |
+| `Ctrl+V` | Paste the system clipboard, replacing the selection |
+| `Ctrl+X` | Cut the selection to the system clipboard |
 | `Ctrl+Z` | Undo last edit in reasoning editor |
 | `Ctrl+Y` | Redo last undone edit |
 | `u` | Revert reasoning editor to last saved content |
@@ -1361,19 +1371,35 @@ start and opens the earliest pending step, announcing the jump in the status bar
 pending, and those would otherwise be unreachable from the keyboard. When the
 current step is the only one left pending it says so rather than doing nothing.
 
-### Copying text
+### Copying and pasting text
 
 Selecting text with the mouse copies it — no copy keystroke — anywhere in the
 TUI: static regions such as the step list, stats pane and help overlay, and
 editable ones such as the compile editor, the reasoning editor and the
-jump-to-step box. `Ctrl+C` inside an editable region copies the selection too.
+jump-to-step box. `Ctrl+C` inside an editable region copies the selection too,
+and `Ctrl+X` cuts it.
 
 The selection goes to the system clipboard (via `wl-copy`, `xclip`, `xsel`,
 `pbcopy` or `clip`, whichever is present) as well as to the terminal via OSC 52,
 so it can be pasted into other applications and not only back into the reasoning
-editor. `Ctrl+V` in the reasoning editor reads the system clipboard, so text
-copied elsewhere pastes in. A plain click selects nothing and copies nothing, so
-clicking never overwrites a clipboard filled elsewhere.
+editor. A plain click selects nothing and copies nothing, so clicking never
+overwrites a clipboard filled elsewhere.
+
+`Ctrl+V` reads the system clipboard in **both** editors (via `wl-paste`,
+`xclip`, `xsel`, `pbpaste` or `powershell -Command Get-Clipboard`), so text
+copied elsewhere pastes in; with no helper installed it falls back to whatever
+was copied inside the TUI. A paste **replaces the current selection** rather than
+inserting beside it, so `Ctrl+A` then `Ctrl+V` swaps the whole document for the
+clipboard — a right-to-left drag selection is handled, and an empty selection
+inserts at the cursor. Both editors share one paste path so the two cannot drift.
+
+`Ctrl+A` selects all in both editors. Textual's `TextArea` binds that key to
+cursor-to-line-start by default; the override is deliberate, and `f6` / `f7`
+still select the line and the document as `TextArea` defines them.
+
+The reasoning editor binds its clipboard and undo keys on the outer widget, not
+only on the inner text area, because `Tab` focuses the outer widget — a key
+bound only on the text area does nothing in that state.
 
 Editable regions need the second path because Textual implements selection
 twice. `TextArea` and `Input` capture the mouse to run their own drag-selection,
@@ -1432,7 +1458,11 @@ The two exits are distinct, and only one of them finalizes:
 | `Ctrl+F` | `CompilerFinalizeOverlay` | Save, confirm, then `FinalizeMemory` IPC → status `complete` |
 | `Ctrl+Q` | `CompilerQuitOverlay` | Save, confirm, exit; session stays `pending_compilation` and is resumable |
 
-`Ctrl+F` is bound with `priority=True` because the editor is a `TextArea`, whose own bindings are resolved before the screen's — the previous `Ctrl+D` was consumed by `TextArea`'s `delete,ctrl+d` and deleted a character instead of finalizing. The finalized `memory.md` and all session files remain accessible indefinitely — a completed session is never expired, and is removed only by an explicit `memory-archive session delete`.
+Editing keys match the reasoning editor: `Ctrl+A` selects all, `Ctrl+V` pastes
+the system clipboard over the selection, and `Ctrl+C` / `Ctrl+X` copy and cut to
+it.
+
+`Ctrl+F` is bound with `priority=True` because the editor is a `TextArea`, whose own bindings are resolved before the screen's — the previous `Ctrl+D` was consumed by `TextArea`'s `delete,ctrl+d` and deleted a character instead of finalizing. `Ctrl+A` and `Ctrl+V` are priority for the same reason: `TextArea` claims both, for cursor-to-line-start and for a paste that reads only the in-app clipboard. All three resolve against the top screen's binding chain, so none of them fires while a confirm overlay is open. The finalized `memory.md` and all session files remain accessible indefinitely — a completed session is never expired, and is removed only by an explicit `memory-archive session delete`.
 
 ### Remote Annotator Mode Behavior
 

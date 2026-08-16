@@ -76,6 +76,16 @@ jobs:
               fail=1
           fi
 
+          # The release body is cut from this section (see "Build release body"
+          # below). Checked here rather than there so a forgotten changelog entry
+          # fails in seconds, instead of after the five-platform build matrix has
+          # run and with the only remaining outcome being a release published
+          # with empty notes.
+          if ! grep -q "^## \[${tag}\]" CHANGELOG.md; then
+              echo "::error::CHANGELOG.md has no '## [${tag}]' section — the release body is cut from it"
+              fail=1
+          fi
+
           exit "${fail}"
 
   build-wheel:
@@ -577,18 +587,50 @@ jobs:
           echo "----- SHA256SUMS -----"
           cat SHA256SUMS
 
+      # The body is this version's CHANGELOG section only. It used to be the
+      # whole file: every release republished the entire history, so the notes
+      # for the version being released sat above tens of thousands of characters
+      # of older entries, and the file was on course to cross GitHub's 125,000
+      # character body limit — at which point tagging fails at the last step of
+      # the release, after everything has been built.
+      #
+      # verify-version has already established that the section exists, so a
+      # miss here is a bug in this extraction rather than a missing entry, and it
+      # fails rather than publishing a release with empty notes.
       - name: Build release body
         id: release-body
         run: |
-          if [ -f CHANGELOG.md ]; then
-            {
-              echo 'body<<RELEASE_BODY_EOF'
-              cat CHANGELOG.md
-              echo 'RELEASE_BODY_EOF'
-            } >> "$GITHUB_OUTPUT"
-          else
-            echo "body=Release ${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+
+          # From the matching heading to the line before the next one. Matched on
+          # "## [x.y.z]" including the closing bracket so 0.4.1 cannot match a
+          # 0.4.11 heading; the date suffix after it is not matched against.
+          section=$(awk -v want="## [${version}]" '
+            index($0, want) == 1 { found = 1; print; next }
+            found && /^## \[/    { exit }
+            found                { print }
+          ' CHANGELOG.md)
+
+          if [ -z "${section}" ]; then
+            echo "::error::Could not cut the ${version} section out of CHANGELOG.md"
+            exit 1
           fi
+
+          # Random delimiter: a heredoc delimiter that also occurs in the content
+          # ends the block early and corrupts every later write to $GITHUB_OUTPUT.
+          delim="RELEASE_BODY_$(openssl rand -hex 16)"
+          {
+            echo "body<<${delim}"
+            echo "${section}"
+            echo
+            echo "---"
+            echo
+            echo "[Full changelog](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md)"
+            echo "${delim}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Release body: $(printf '%s' "${section}" | wc -c) characters"
 
       - name: Create release and upload assets
         uses: softprops/action-gh-release@v2

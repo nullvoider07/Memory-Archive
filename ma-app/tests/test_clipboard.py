@@ -30,12 +30,17 @@ from textual import events
 from textual.app import ComposeResult
 from textual.widgets import Input, Static, TextArea
 
+from textual.widgets.text_area import Selection
+
 from ma_app.tui import clipboard
 from ma_app.tui.clipboard import (
     ClipboardApp,
     copy_to_os_clipboard,
     paste_from_os_clipboard,
 )
+from ma_app.tui.screens.compiler import CompilerScreen
+from ma_app.tui.session_loader import StepState
+from ma_app.tui.widgets.reasoning_editor import ReasoningEditor
 
 STATIC_TEXT = "static line one"
 AREA_TEXT = "alpha beta gamma\ndelta epsilon"
@@ -521,3 +526,286 @@ def test_a_failing_paste_helper_yields_empty_not_an_error(monkeypatch):
 
     monkeypatch.setattr(clipboard.subprocess, "run", boom)
     assert paste_from_os_clipboard() == ""
+
+
+# Paste replaces the selection
+
+
+class EditorApp(ClipboardApp):
+    """The reasoning editor on its own, so Ctrl+V goes through its binding."""
+
+    def compose(self) -> ComposeResult:
+        yield ReasoningEditor()
+
+
+def _editor_paste(initial: str, pasted: str, select, monkeypatch) -> tuple[str, tuple]:
+    """
+    Drive one Ctrl+V through the real widget and return (text, cursor).
+
+    Both editors route through clipboard.paste_into, which reads the OS
+    clipboard via the module global patched here.
+    """
+    monkeypatch.setattr(clipboard, "paste_from_os_clipboard", lambda: pasted)
+
+    async def scenario():
+        app = EditorApp()
+        async with app.run_test(size=(60, 20)) as pilot:
+            area = app.query_one("#editor-area", TextArea)
+            area.load_text(initial)
+            area.focus()
+            await pilot.pause()
+            select(area)
+            await pilot.pause()
+            await pilot.press("ctrl+v")
+            await pilot.pause()
+            return area.text, area.cursor_location
+
+    return _run(scenario)
+
+
+def test_paste_over_select_all_replaces_the_document(monkeypatch):
+    """
+    The reported bug: Ctrl+A then Ctrl+V appended instead of replacing.
+
+    action_paste called TextArea.insert(), which writes at cursor_location and
+    leaves the selection alone. After select-all the cursor sits at the end of
+    the document, so the pasted text landed immediately after the text it was
+    supposed to overwrite, with no separator.
+    """
+    text, cursor = _editor_paste(
+        "old reasoning text",
+        "new reasoning text",
+        lambda area: area.select_all(),
+        monkeypatch,
+    )
+    assert text == "new reasoning text"
+    assert cursor == (0, len("new reasoning text")), "cursor must follow the paste"
+
+
+def test_paste_over_a_partial_selection_replaces_only_it(monkeypatch):
+    text, _ = _editor_paste(
+        "alpha beta gamma",
+        "BETA",
+        lambda area: setattr(area, "selection", Selection((0, 6), (0, 10))),
+        monkeypatch,
+    )
+    assert text == "alpha BETA gamma"
+
+
+def test_paste_over_a_backwards_selection_replaces_it(monkeypatch):
+    """A drag from right to left gives a Selection whose end precedes its start."""
+    text, _ = _editor_paste(
+        "alpha beta gamma",
+        "BETA",
+        lambda area: setattr(area, "selection", Selection((0, 10), (0, 6))),
+        monkeypatch,
+    )
+    assert text == "alpha BETA gamma"
+
+
+def test_paste_with_no_selection_still_inserts_at_the_cursor(monkeypatch):
+    """The collapsed case must keep working — replace over an empty range."""
+    text, cursor = _editor_paste(
+        "alpha gamma",
+        "beta ",
+        lambda area: area.move_cursor((0, 6)),
+        monkeypatch,
+    )
+    assert text == "alpha beta gamma"
+    assert cursor == (0, 11)
+
+
+def test_cut_from_the_outer_widget_reaches_the_os_clipboard(os_copies):
+    """
+    Tab focuses the ReasoningEditor itself, not its TextArea.
+
+    Ctrl+A/C/V were bound on the outer widget for exactly that case but Ctrl+X
+    was not, so cut silently did nothing whenever the editor had been reached by
+    Tab rather than by clicking into the text.
+    """
+
+    async def scenario():
+        app = EditorApp()
+        async with app.run_test(size=(60, 20)) as pilot:
+            editor = app.query_one(ReasoningEditor)
+            area = app.query_one("#editor-area", TextArea)
+            area.load_text("cut this line")
+            area.selection = Selection((0, 0), (0, 8))
+            editor.focus()
+            await pilot.pause()
+            await pilot.press("ctrl+x")
+            await pilot.pause()
+            return area.text
+
+    remaining = _run(scenario)
+    assert os_copies == ["cut this"]
+    assert remaining == " line"
+
+
+# The compile editor
+
+
+class CompilerApp(ClipboardApp):
+    """The memory.md editor, driven the way `memory-archive compile` runs it."""
+
+    def __init__(self, path, text: str) -> None:
+        super().__init__()
+        self._compiler = CompilerScreen(path, text)
+
+    def get_default_screen(self) -> CompilerScreen:
+        # The compile screen must be the *default* screen, not one pushed from
+        # on_mount: a push is queued and the editor would not exist yet when the
+        # test starts driving keys at it.
+        return self._compiler
+
+
+def _compile_editor(tmp_path, initial: str, body):
+    async def scenario():
+        app = CompilerApp(tmp_path / "memory.md", initial)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            area = app.query_one("#memory-editor", TextArea)
+            await body(app, pilot, area)
+            return area.text
+
+    return _run(scenario)
+
+
+def test_compile_editor_pastes_from_the_os_clipboard(tmp_path, monkeypatch):
+    """
+    Ctrl+V here fell through to TextArea.action_paste, which reads App.clipboard
+    and nothing else — so text copied in any other application had nowhere to
+    land in the file that is the whole point of the compile step.
+    """
+    monkeypatch.setattr(clipboard, "paste_from_os_clipboard", lambda: "## Overview")
+
+    async def body(app, pilot, area):
+        area.move_cursor(area.document.end)
+        await pilot.press("ctrl+v")
+        await pilot.pause()
+
+    assert _compile_editor(tmp_path, "# Memory: x\n", body) == "# Memory: x\n## Overview"
+
+
+def test_compile_editor_paste_replaces_the_selection(tmp_path, monkeypatch):
+    monkeypatch.setattr(clipboard, "paste_from_os_clipboard", lambda: "replacement")
+
+    async def body(app, pilot, area):
+        area.select_all()
+        await pilot.press("ctrl+v")
+        await pilot.pause()
+
+    assert _compile_editor(tmp_path, "the old draft", body) == "replacement"
+
+
+def test_compile_editor_ctrl_a_selects_all(tmp_path):
+    """
+    TextArea binds ctrl+a to cursor_line_start, so the same keystroke meant
+    select-all in the reasoning editor and "go to column 0" here.
+    """
+    captured: list[str] = []
+
+    async def body(app, pilot, area):
+        await pilot.press("ctrl+a")
+        await pilot.pause()
+        captured.append(area.selected_text)
+
+    _compile_editor(tmp_path, "line one\nline two", body)
+    assert captured == ["line one\nline two"]
+
+
+# The dirty check
+
+
+def _dirty_after_save(buffer_text: str) -> bool:
+    """
+    Save `buffer_text` the way AnnotationScreen does and report if it stays dirty.
+
+    The screen posts StepSaved with text.strip() and feeds that same stripped
+    string back through mark_saved, so the baseline is stripped while the buffer
+    is not.
+    """
+    step = StepState(
+        step_id=1,
+        timestamp="t",
+        action_type="mouse",
+        action_subtype="left",
+        image_path=None,
+        image_fetched=True,
+        marked=True,
+    )
+
+    async def scenario():
+        app = EditorApp()
+        async with app.run_test(size=(60, 20)) as pilot:
+            editor = app.query_one(ReasoningEditor)
+            editor.enter_edit_mode(step)
+            await pilot.pause()
+            app.query_one("#editor-area", TextArea).load_text(buffer_text)
+            await pilot.pause()
+            editor.mark_saved(1, buffer_text.strip())
+            return editor.has_unsaved_draft()
+
+    return _run(scenario)
+
+
+def test_a_trailing_newline_does_not_leave_the_step_permanently_dirty():
+    """
+    Pressing Enter at the end of an annotation made the editor dirty forever:
+    autosave rewrote reasoning.jsonl every 2.5 s and quitting always claimed
+    unsaved changes, because the raw buffer was compared to a stripped baseline.
+    """
+    assert _dirty_after_save("some reasoning\n") is False
+    assert _dirty_after_save("  leading and trailing  ") is False
+
+
+def test_a_real_edit_is_still_reported_as_unsaved():
+    """The stripped comparison must not swallow an actual change."""
+    assert _dirty_after_save("saved text") is False
+
+    step = StepState(
+        step_id=1,
+        timestamp="t",
+        action_type="mouse",
+        action_subtype="left",
+        image_path=None,
+        image_fetched=True,
+        marked=True,
+    )
+
+    async def scenario():
+        app = EditorApp()
+        async with app.run_test(size=(60, 20)) as pilot:
+            editor = app.query_one(ReasoningEditor)
+            editor.enter_edit_mode(step)
+            await pilot.pause()
+            area = app.query_one("#editor-area", TextArea)
+            area.load_text("saved text")
+            await pilot.pause()
+            editor.mark_saved(1, "saved text")
+            area.load_text("saved text, now edited")
+            await pilot.pause()
+            return editor.has_unsaved_draft()
+
+    assert _run(scenario) is True
+
+
+def test_paste_falls_back_to_the_in_app_clipboard(monkeypatch):
+    """With no OS helper the widget still pastes what was copied in the TUI."""
+    monkeypatch.setattr(clipboard, "paste_from_os_clipboard", lambda: "")
+
+    async def scenario():
+        app = EditorApp()
+        async with app.run_test(size=(60, 20)) as pilot:
+            area = app.query_one("#editor-area", TextArea)
+            area.load_text("old text")
+            area.focus()
+            await pilot.pause()
+            app.copy_to_clipboard("in-app text")
+            area.select_all()
+            await pilot.pause()
+            await pilot.press("ctrl+v")
+            await pilot.pause()
+            return area.text
+
+    assert _run(scenario) == "in-app text"

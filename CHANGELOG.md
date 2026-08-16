@@ -3,6 +3,59 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] — 2026-08-16
+
+Editor fixes found while annotating. Paste replaces the selection, the compile
+editor reaches the system clipboard, and a saved step stops reporting itself as
+unsaved forever. No wire, storage or CLI change — a session recorded or annotated
+by 0.4.0 is read identically by 0.4.1.
+
+### Fixed
+
+- **Pasting over selected text appended instead of replacing it.** In the
+  reasoning editor, `Ctrl+A` then `Ctrl+V` left the selected text in place and
+  inserted the clipboard immediately after it, with no separator — the opposite
+  of what select-all-and-paste means everywhere else, and the exact operation an
+  annotator performs to replace a draft. The override called
+  `TextArea.insert()`, which writes at `cursor_location` and does not touch the
+  selection; after select-all the cursor sits at the end of the document, so the
+  paste landed past the whole buffer. It now replaces the selection range, which
+  is what Textual's own paste action and its bracketed-paste handler both do. A
+  right-to-left drag selection is handled — the edit sorts the range — and an
+  empty selection still inserts at the cursor. The cursor now follows the pasted
+  text instead of staying where it was.
+
+- **The compile editor could not paste from another application.** It had no
+  paste binding of its own, so `Ctrl+V` fell through to Textual's, which reads
+  the in-app clipboard and nothing else. Text copied anywhere outside the TUI had
+  nowhere to land in `memory.md` — the document the compile step exists to
+  produce. Both editors now share one paste path, so the source and the
+  selection-replacement semantics cannot drift apart again.
+
+- **`Ctrl+A` meant two different things in the two editors.** `TextArea` binds it
+  to cursor-to-line-start, which the reasoning editor overrode and the compile
+  editor did not. It selects all in both now. Textual's own `f6`/`f7` selection
+  bindings are unchanged.
+
+- **Cut, undo and redo did nothing when the reasoning editor was reached by
+  `Tab`.** The outer editor widget is focusable in its own right, and only keys
+  bound on it reach the inner text area in that state. `Ctrl+A`, `Ctrl+C` and
+  `Ctrl+V` were bound there; `Ctrl+X`, `Ctrl+Z` and `Ctrl+Y` were not — while the
+  widget's own documentation listed all of them as working regardless of which
+  half held focus. The three missing keys are bound, and cut reaches the system
+  clipboard like every other copy path.
+
+- **An annotation ending in a newline left its step permanently unsaved.** Saving
+  persists `text.strip()` and stores that stripped string as the baseline, but
+  the dirty check compared it against the raw buffer. So a trailing newline — one
+  `Enter` at the end of a paragraph — never matched: autosave rewrote
+  `reasoning.jsonl` and fired an IPC progress notification every 2.5 seconds for
+  the rest of the session, the save indicator flashed continuously, and quitting
+  always claimed unsaved changes and asked for confirmation. Both call sites now
+  compare the same stripped form that is actually persisted. Nothing was written
+  wrongly — the repeated writes were idempotent — but a confirmation prompt that
+  fires every time teaches an annotator to dismiss it unread.
+
 ## [0.4.0] — 2026-08-13
 
 Control-Center 1.3.0 support, and the record fidelity work that goes with it: a
