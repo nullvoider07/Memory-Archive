@@ -17,14 +17,17 @@ from pathlib import Path
 
 import pytest
 
-from conftest import require_cc, staged_versions
+from conftest import require_cc, require_cc_agent, staged_versions
 from harness import (
+    cc_agent,
     cc_server,
     cli,
+    cli_detached,
     ma_core,
     mint_token,
     register_session,
     session_status,
+    wait_for_file_line,
     write_tls_material,
 )
 
@@ -36,6 +39,15 @@ pytestmark = pytest.mark.integration
 HARDENED = staged_versions(minimum="1.1.0")
 # The newest staged release — what an operator would actually be running.
 LATEST = HARDENED[-1]
+
+
+def _as_version(version: str) -> tuple[int, ...]:
+    """`"1.2.10"` -> `(1, 2, 10)`. String order would put 1.10 before 1.9."""
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except ValueError:
+        # staged_versions() yields a "0.0.0" placeholder when nothing is staged.
+        return (0, 0, 0)
 
 
 def _log(ma) -> str:
@@ -225,3 +237,173 @@ def test_supported_version_is_recorded_as_provenance(workdir: Path, clean_regist
             _start(ma, session)
 
             assert f"server_version={LATEST}" in _log(ma), _log(ma)[-1500:]
+
+
+# ---------------------------------------------------------------------------
+# Record fidelity — the agent gate
+#
+# These need a real agent, not just a server. `agent_version` only exists on the
+# wire once one has registered: with none attached the server stamps an empty
+# string on its heartbeats, so every test above reaches the connect gate and
+# never the fidelity gate. That gap is why the truncation was not caught here.
+#
+# The agent registers and idles. Nothing actuates, and nothing needs to — the
+# server emits a heartbeat carrying the agent version every five seconds, and
+# that is the whole input to the gate.
+# ---------------------------------------------------------------------------
+
+# Releases whose agent stores a typed command truncated at the first quote.
+# Fixed in 1.2.2; see ma-core/src/capture/compat.rs RECORD_FIDELITY_MIN.
+#
+# Both lists fall back to a placeholder rather than being allowed to go empty.
+# An empty `parametrize` collects zero tests and still reports green, which is
+# the same silent-row-drop the strict-mode note warns about — and here it would
+# hide the loss of the only coverage either side of the fidelity floor. The
+# placeholder collects one row that skips through `require_cc` with an
+# actionable message, or fails outright under MA_INTEGRATION_STRICT.
+LOSSY_AGENTS = [v for v in staged_versions() if _as_version(v) < (1, 2, 2)] or ["1.0.0"]
+FAITHFUL_AGENTS = [v for v in staged_versions() if _as_version(v) >= (1, 2, 2)] or ["1.2.2"]
+
+
+def _fidelity_env(version: str, workdir: Path):
+    """Transport settings for `version`, so each test is about the gate only.
+
+    1.0.0 is plaintext with no scopes; 1.1.0+ mandates TLS and wants a token on
+    both halves. Returns `(hardened, tls_material, ca_path_str)`.
+    """
+    hardened = _as_version(version) >= (1, 1, 0)
+    tls = write_tls_material(workdir / "tls") if hardened else None
+    ca = str(tls[0]) if tls else ""
+    return hardened, tls, ca
+
+
+@pytest.mark.parametrize("version", LOSSY_AGENTS)
+def test_a_lossy_agent_is_refused_before_it_records_anything(
+    version, workdir: Path, clean_registry
+):
+    """An agent that misreports what it typed must not produce a trace at all.
+
+    The failure this prevents is not a crash — it is a session that records
+    perfectly except that one command is stored short, which is discoverable
+    only by reading frames weeks later. An empty session is recoverable; a
+    plausible wrong one is not.
+    """
+    server = require_cc(version)
+    agent = require_cc_agent(version)
+    hardened, tls, ca = _fidelity_env(version, workdir)
+
+    with cc_server(server, workdir, tls) as cc:
+        with cc_agent(
+            agent, workdir, cc.port,
+            token=mint_token("agent") if hardened else None,
+            tls_ca=Path(ca) if ca else None,
+        ):
+            with ma_core(
+                workdir, cc.port,
+                token=mint_token("monitor") if hardened else "",
+                security="auto" if hardened else "legacy",
+                tls_ca=ca,
+                silence_timeout=20,
+            ) as ma:
+                session = register_session(ma.config_path, "fidelity-lossy")
+                _start(ma, session)
+
+                log = _log(ma)
+                # The refusal has to name the version found, the version that
+                # fixes it, and the override — an operator reading only this
+                # line must be able to act on it.
+                assert "does not record typed commands faithfully" in log, log[-2500:]
+                assert version in log, log[-2500:]
+                assert "1.2.2" in log, log[-2500:]
+                assert "control_center_allow_unsupported" in log, log[-2500:]
+
+                # And it must not be left looking like a healthy capture.
+                assert session_status(ma.config_path, session) != "active"
+
+
+@pytest.mark.parametrize("version", FAITHFUL_AGENTS)
+def test_an_agent_at_the_fidelity_floor_is_not_refused(
+    version, workdir: Path, clean_registry
+):
+    """The other half of the gate: a fixed agent must still record.
+
+    Without this, a gate that refused everything would pass the test above and
+    silently end the corpus.
+    """
+    server = require_cc(version)
+    agent = require_cc_agent(version)
+    hardened, tls, ca = _fidelity_env(version, workdir)
+
+    with cc_server(server, workdir, tls) as cc:
+        with cc_agent(
+            agent, workdir, cc.port,
+            token=mint_token("agent") if hardened else None,
+            tls_ca=Path(ca) if ca else None,
+        ):
+            with ma_core(
+                workdir, cc.port,
+                token=mint_token("monitor") if hardened else "",
+                security="auto" if hardened else "legacy",
+                tls_ca=ca,
+                silence_timeout=20,
+            ) as ma:
+                session = register_session(ma.config_path, "fidelity-ok")
+                # Detached: a session that is *not* refused keeps running, so a
+                # blocking start would hang until the harness timeout and report
+                # the feature working as a failure.
+                with cli_detached(ma.config_path, "start", "--session", session):
+                    accepted = wait_for_file_line(
+                        ma.log, "agent records typed commands faithfully", timeout=45.0
+                    )
+
+                log = _log(ma)
+                # Positive assertion on purpose. Asserting only that the refusal
+                # is absent would also pass when no agent version ever reached
+                # the gate — which is exactly what happened while writing this,
+                # because the silence timeout matched the heartbeat interval.
+                assert accepted, log[-2500:]
+                assert version in log, log[-2500:]
+                assert "does not record typed commands faithfully" not in log, log[-2500:]
+
+
+@pytest.mark.parametrize("version", LOSSY_AGENTS)
+def test_allow_unsupported_overrides_the_agent_gate(
+    version, workdir: Path, clean_registry
+):
+    """The documented escape hatch has to actually work, and has to warn.
+
+    A refusal with no override would strand anyone who genuinely needs to record
+    against an old agent; an override that goes quiet would recreate the original
+    problem with an extra step.
+    """
+    server = require_cc(version)
+    agent = require_cc_agent(version)
+    hardened, tls, ca = _fidelity_env(version, workdir)
+
+    with cc_server(server, workdir, tls) as cc:
+        with cc_agent(
+            agent, workdir, cc.port,
+            token=mint_token("agent") if hardened else None,
+            tls_ca=Path(ca) if ca else None,
+        ):
+            with ma_core(
+                workdir, cc.port,
+                token=mint_token("monitor") if hardened else "",
+                security="auto" if hardened else "legacy",
+                tls_ca=ca,
+                allow_unsupported=True,
+                silence_timeout=20,
+            ) as ma:
+                session = register_session(ma.config_path, "fidelity-override")
+                # Detached for the same reason as the faithful case: the whole
+                # point of the override is that recording continues.
+                with cli_detached(ma.config_path, "start", "--session", session):
+                    warned = wait_for_file_line(
+                        ma.log, "control_center_allow_unsupported is set", timeout=45.0
+                    )
+
+                log = _log(ma)
+                assert warned, log[-2500:]
+                # Still says what it is recording against, so the trace is not
+                # silently trusted just because the operator opted in.
+                assert "does not record typed commands faithfully" in log, log[-2500:]

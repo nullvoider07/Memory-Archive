@@ -114,5 +114,8 @@ fn disconnect_reason_str(reason: &DisconnectReason) -> String {
         DisconnectReason::AgentDisconnected => "agent disconnected".to_string(),
         DisconnectReason::SilenceTimeout => "silence timeout".to_string(),
         DisconnectReason::TransportError(msg) => format!("transport error: {msg}"),
+        DisconnectReason::AgentRecordsLossy(msg) => {
+            format!("refused: agent does not record faithfully: {msg}")
+        }
     }
 }

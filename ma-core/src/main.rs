@@ -373,6 +373,8 @@ async fn main() -> anyhow::Result<()> {
                                     marked: false,
                                     before_image_path: None,
                                     after_image_path: None,
+                                    record_suspect:
+                                        crate::capture::fidelity::inspect(&ke.event),
                                 };
                                 state.append_step(step_entry);
                                 state.update_kafka_position(ke.partition, ke.offset);

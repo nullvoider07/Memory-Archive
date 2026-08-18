@@ -22,6 +22,10 @@ pub enum DisconnectReason {
     AgentDisconnected,
     SilenceTimeout,
     TransportError(String),
+    /// The agent reported a version known to store a damaged copy of what it
+    /// typed. Refused before any step was written, so the session ends with an
+    /// empty trace rather than a lossy one.
+    AgentRecordsLossy(String),
 }
 
 // WatchStream
@@ -31,6 +35,19 @@ pub struct WatchStream {
     disconnect_reason: Option<DisconnectReason>,
     transport: Transport,
     server_version: String,
+    /// Mirrors the connect-time escape hatch. The agent gate runs later than the
+    /// server gate, so it needs its own copy of the same setting.
+    allow_unsupported: bool,
+    /// The last agent version this gate evaluated. Empty until the first event
+    /// that carries one.
+    ///
+    /// Tracked as the value rather than a "have we checked" flag so a version
+    /// that *changes* mid-stream is re-evaluated. The server closes the stream
+    /// when its agent goes away, but only from the 5s idle branch — a different
+    /// agent that registers inside that window inherits the open stream, and a
+    /// once-only gate would carry the departed agent's verdict over to it.
+    /// Re-checking on change costs one string compare per event.
+    checked_agent_version: String,
 }
 
 /// Transports to attempt, in order, for a given policy.
@@ -179,6 +196,8 @@ impl WatchStream {
                         disconnect_reason: None,
                         transport,
                         server_version,
+                        allow_unsupported: cc.allow_unsupported,
+                        checked_agent_version: String::new(),
                     });
                 }
                 Err(e) => {
@@ -447,6 +466,48 @@ impl WatchStream {
                     return None;
                 }
                 Ok(Ok(Some(event))) => {
+                    // Checked before the heartbeat drop, and therefore usually
+                    // before any step exists. A heartbeat is a CommandEvent and
+                    // carries `agent_version` like any other, so an idle agent
+                    // announces itself within one heartbeat interval — the gate
+                    // gets to refuse a lossy agent while the trace is still
+                    // empty. Nothing at connect can do this: `GetServerIdentity`
+                    // reports the server, and `ConnectionMetadata` has no
+                    // agent_version field at all.
+                    if !event.agent_version.trim().is_empty()
+                        && event.agent_version != self.checked_agent_version
+                    {
+                        self.checked_agent_version = event.agent_version.clone();
+                        if let Some(refusal) =
+                            compat::evaluate_agent(&event.agent_version).refusal()
+                        {
+                            if self.allow_unsupported {
+                                tracing::warn!(
+                                    agent_version = %event.agent_version,
+                                    "control_center_allow_unsupported is set — recording \
+                                     anyway. {refusal}"
+                                );
+                            } else {
+                                tracing::error!(
+                                    agent_version = %event.agent_version,
+                                    "{refusal}"
+                                );
+                                self.disconnect_reason =
+                                    Some(DisconnectReason::AgentRecordsLossy(refusal));
+                                return None;
+                            }
+                        } else {
+                            // Says so on the accepted path too. Without this the
+                            // only evidence the gate ran is the absence of a
+                            // refusal, which is equally consistent with never
+                            // having seen an agent version at all.
+                            tracing::info!(
+                                agent_version = %event.agent_version,
+                                "Control-Center agent records typed commands faithfully"
+                            );
+                        }
+                    }
+
                     if event.is_heartbeat {
                         continue;
                     }

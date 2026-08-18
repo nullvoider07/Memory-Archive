@@ -3,6 +3,111 @@
 All notable changes to Memory Archive are documented in this file. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] — 2026-08-18
+
+Record fidelity: the recorder no longer trusts an agent that is known to
+misreport what it typed, and says so when a stored command looks cut short. No
+wire, storage or CLI change — a session recorded by 0.4.1 is read identically,
+and `record_suspect` is absent from every step that is not flagged.
+
+### Added
+
+- **The Control-Center *agent* version is now gated, not just the server's.**
+  Control-Center below 1.2.2 rebuilt its own report of a typed command by
+  scanning for a closing quote, so anything typed with a quote in it was stored
+  truncated at that quote. The keystrokes actuated correctly and the artifact on
+  disk was byte-exact — only the record was damaged, which is what made it
+  survive: every self-reporting signal said success. One corpus session
+  (`textedit-new-saveas` step 2, recorded 2026-07-22 on agent 1.0.0) carries the
+  damage, and it was found a month later while annotating, not at capture.
+
+  The existing gate could not have caught it. It evaluates the version from
+  `GetServerIdentity` at connect, and the defect is in `crates/agent`; a current
+  server can front an old agent, and `record_agent_version` only warned when the
+  two *differed*, so a matched 1.0.0 pair passed in silence. A new
+  `RECORD_FIDELITY_MIN` (1.2.2) is checked against the agent version and refuses
+  the session, overridable with the existing `control_center_allow_unsupported`.
+
+  This is deliberately a second floor rather than a raise of `SUPPORTED_MIN`, and
+  that constant's documentation is corrected: 1.0.0 connects and actuates fine,
+  which is what it was describing, but it does not record faithfully. Collapsing
+  "can we drive it" into "can we trust what it says" is what let this through.
+
+  The check runs on the first event carrying a version — including a heartbeat,
+  which an idle agent sends every five seconds — so it normally refuses before a
+  single step has been written, leaving an empty trace rather than a lossy one.
+  Nothing at connect can do this: `GetServerIdentity` reports the server, and
+  `ConnectionMetadata` has no agent version field at all.
+
+- **A recorded command that looks cut short is now flagged in `metadata.json`
+  and shown while annotating.** The version gate closes a known defect in a known
+  release; this is what notices an unknown one. A new `record_suspect` object on
+  the step carries which check fired and what to do about it, and the annotation
+  pane shows a banner on that step.
+
+  It is advisory and stays that way: it never alters the recorded command, never
+  fails a step or a session, and never reaches `reasoning.jsonl` or the compiled
+  `memory.md`. Repairing a damaged record is a person's job, done from the frames
+  and stamped with its provenance — a guess written by the recorder would be
+  indistinguishable from a reading.
+
+  The three signals are the three shapes the known truncations actually left,
+  strongest first: a trailing lone backslash (`dangling-escape`), an odd number
+  of unescaped double quotes, then of single quotes. The first is what both
+  macOS truncations left — note that neither contains a quote at all, the cut
+  landing before the first one, so an unbalanced-quote test alone would have
+  missed the very case this exists for. The discriminator against a Windows path
+  ending in `\` is what precedes the backslash: whitespace means a cut, a word
+  character means a path separator. Measured over all 164 typed payloads in the
+  recorded corpus this flags **none** of them, and flags all three known
+  truncations. Single quotes are reported last and say so in the note, because an
+  apostrophe in typed prose trips them legitimately.
+
+### Changed
+
+- **The compatibility matrix drives a real Control-Center agent.** Every case in
+  it ran server-only, and `agent_version` does not exist on the wire until an
+  agent registers — until then the server stamps an empty string on its
+  heartbeats. So the matrix could not reach the record-fidelity gate at all,
+  which is the gap the truncation shipped through. `stage-cc-releases.sh` now
+  also lays down `control-center-agent` out of the archive it already downloads,
+  and three cases cover the refusal, the accepted path and the override. Nothing
+  actuates: the agent registers and idles, which is why this runs headless.
+
+  Writing them surfaced two harness faults that had been making a green run
+  meaningless for this code path. `silence_timeout_seconds` was pinned to 5s,
+  exactly the server's heartbeat interval, so a test that needed to *receive* a
+  heartbeat raced it and usually lost — it is configurable now, and the fidelity
+  cases raise it. And the accepted path had no log line of its own, so a test
+  could only assert that no refusal appeared, which is equally true when no agent
+  version ever reached the gate; ma-core now logs the accepted version, and the
+  test asserts on that instead.
+
+  Both parametrised lists also fall back to a placeholder rather than being
+  allowed to go empty. An empty `parametrize` collects nothing and still reports
+  green, which would silently drop the only coverage on one side of the floor.
+
+- **A staged Control-Center version now counts as staged only when both binaries
+  are present.** `stage-cc-releases.sh` decided a version was already cached by
+  looking for the server alone, so a cache populated before the agent was needed
+  held a server and no agent — and re-running the script skipped it, which meant
+  the instruction printed by a failing strict run ("re-run stage-cc-releases.sh")
+  could never repair the thing it was complaining about. The skip now requires
+  the agent too, and a `NO_AGENT` marker records the versions whose archive
+  genuinely carries none so those are not re-downloaded on every run.
+
+### Security
+
+- **The truncation warning no longer writes the typed command into the log.**
+  The advisory check fired a `WARN` carrying `raw_command` verbatim, which would
+  have been the only place ma-core logs a typed payload. A typed payload is
+  whatever the agent typed, up to and including a credential entered at a prompt,
+  and the log is a different artifact with a different lifetime from the session
+  directory — pasted into an issue, or tailed on a screen this project is in the
+  business of recording. The warning now names the session and the step id
+  instead, which is what makes it actionable; the record itself already holds the
+  text.
+
 ## [0.4.1] — 2026-08-16
 
 Editor fixes found while annotating. Paste replaces the selection, the compile

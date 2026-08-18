@@ -17,9 +17,29 @@
 
 use std::fmt;
 
-/// Oldest Control-Center this build records correctly. 1.0.0 has no TLS and no
-/// scope enforcement; the transport negotiation in `stream` handles it.
+/// Oldest Control-Center this build can *connect to and drive*. 1.0.0 has no TLS
+/// and no scope enforcement; the transport negotiation in `stream` handles it.
+///
+/// This is deliberately not a statement about record fidelity — see
+/// [`RECORD_FIDELITY_MIN`]. The two floors are separate because they failed
+/// separately: a 1.0.0 agent connects, actuates and reports success while
+/// storing a truncated copy of what it typed.
 pub const SUPPORTED_MIN: Version = Version::new(1, 0, 0);
+
+/// Oldest Control-Center **agent** that reports a typed command faithfully.
+///
+/// Below this, the agent reverse-engineered its own `human_command` by scanning
+/// for a closing quote with a naive `find('"')`, so anything typed with an
+/// embedded quote was stored truncated at that quote. The keystrokes actuated
+/// correctly and the artifact on disk was byte-exact — only the record was
+/// damaged, which is what makes it dangerous: every self-reporting signal says
+/// success while the trace is quietly lossy. Control-Center 1.2.2 (`122e406`)
+/// removed the mechanism, making `human_command` a controller-supplied field
+/// instead of an agent-derived guess.
+///
+/// This is checked against the **agent** version, not the server's. The defect
+/// lived in `crates/agent`, and a modern server can front an old agent.
+pub const RECORD_FIDELITY_MIN: Version = Version::new(1, 2, 2);
 
 /// Newest Control-Center this build has been verified against. Raise it only
 /// alongside a run of the compatibility matrix in `integration-tests/`.
@@ -130,6 +150,65 @@ impl Compat {
     }
 }
 
+/// The outcome of checking the reported Control-Center **agent** version against
+/// the record-fidelity floor.
+///
+/// Separate from [`Compat`] because it answers a different question and arrives
+/// at a different time. [`Compat`] asks "can this build drive that server?" and
+/// is answered at connect, from `GetServerIdentity`. This asks "will what that
+/// agent reports match what it did?" and cannot be answered until the first
+/// event arrives, because no connect-time RPC carries the agent version —
+/// `ConnectionMetadata` does not include it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentFidelity {
+    /// At or above the fidelity floor.
+    Faithful(Version),
+    /// Known to store a damaged copy of what it typed.
+    Lossy { found: Version, min: Version },
+    /// The agent did not report a version, or reported one we cannot parse.
+    ///
+    /// Not a refusal, matching [`Compat::Unknown`]: sessions recorded before
+    /// Control-Center reported a version at all are silent-but-working, and
+    /// turning them into a hard failure would be a regression rather than a
+    /// safeguard. It is still worth saying out loud, because it means the
+    /// session carries no fidelity evidence either way.
+    Unknown(String),
+}
+
+/// Evaluate the agent version carried by a `CommandEvent`.
+pub fn evaluate_agent(reported: &str) -> AgentFidelity {
+    match Version::parse(reported) {
+        None => AgentFidelity::Unknown(reported.to_string()),
+        Some(found) if found < RECORD_FIDELITY_MIN => AgentFidelity::Lossy {
+            found,
+            min: RECORD_FIDELITY_MIN,
+        },
+        Some(found) => AgentFidelity::Faithful(found),
+    }
+}
+
+impl AgentFidelity {
+    /// The operator-facing refusal, or None when the agent is acceptable.
+    pub fn refusal(&self) -> Option<String> {
+        match self {
+            AgentFidelity::Faithful(_) | AgentFidelity::Unknown(_) => None,
+            AgentFidelity::Lossy { found, min } => Some(format!(
+                "Control-Center agent {found} does not record typed commands \
+                 faithfully. Below {min} the agent rebuilt its own report of what it \
+                 typed by scanning for a closing quote, so any command containing one \
+                 is stored truncated at that quote. The keystrokes actuate correctly \
+                 and the artifact on disk is byte-exact — only the record is damaged, \
+                 so nothing at capture time looks wrong and the loss is found long \
+                 after the environment that produced it is gone. Refusing to record \
+                 rather than write a trace that cannot be trusted. Upgrade the \
+                 Control-Center agent to {min} or later (the server version is checked \
+                 separately and does not cover this — the defect is in the agent). To \
+                 record anyway, set `control_center_allow_unsupported = true`."
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +277,97 @@ mod tests {
         let verdict = evaluate("", None);
         assert!(matches!(verdict, Compat::Unknown(_)));
         assert!(verdict.refusal().is_none(), "unknown must not become a hard failure");
+    }
+
+    #[test]
+    fn the_fidelity_floor_is_not_the_connect_floor() {
+        // These are separate facts and must not be collapsed. 1.0.0 connects
+        // fine and records typed commands wrongly; conflating the two is what
+        // let the truncation through in the first place.
+        assert!(RECORD_FIDELITY_MIN > SUPPORTED_MIN);
+        assert!(matches!(evaluate("1.0.0", None), Compat::Supported(_)));
+        assert!(matches!(
+            evaluate_agent("1.0.0"),
+            AgentFidelity::Lossy { .. }
+        ));
+    }
+
+    #[test]
+    fn agents_that_truncate_are_refused_with_an_actionable_message() {
+        // 1.0.0 is the version that produced the one damaged record in the
+        // corpus (textedit-new-saveas step 2, 2026-07-22): the agent typed
+        // `printf "Title\n..."` in full and stored `Typed: printf \`.
+        for v in ["1.0.0", "1.1.0", "1.2.0", "1.2.1"] {
+            let verdict = evaluate_agent(v);
+            assert!(
+                matches!(verdict, AgentFidelity::Lossy { .. }),
+                "agent {v} predates the human_command fix and must be refused"
+            );
+            let msg = verdict.refusal().expect("a lossy agent must refuse");
+            assert!(msg.contains(v), "the refusal must name the version found");
+            assert!(msg.contains("1.2.2"), "the refusal must name the fix version");
+            assert!(
+                msg.contains("control_center_allow_unsupported"),
+                "the refusal must name the override"
+            );
+        }
+    }
+
+    #[test]
+    fn the_refusal_reads_as_prose_not_as_a_collapsed_literal() {
+        // This message is printed to an operator's console verbatim: it is
+        // carried to the CLI as the IPC disconnect reason, not just logged. A
+        // wrapped literal that loses its line continuations still contains every
+        // word a `contains` assertion looks for, so nothing above would catch it
+        // — the damage is only visible in the whitespace.
+        let msg = evaluate_agent("1.0.0")
+            .refusal()
+            .expect("a lossy agent must refuse");
+        assert!(
+            !msg.contains("  "),
+            "the refusal must not carry a run of spaces: {msg}"
+        );
+        assert!(
+            !msg.contains('\n'),
+            "the refusal is one paragraph — the caller decides how to wrap it"
+        );
+    }
+
+    #[test]
+    fn agents_at_or_above_the_fix_are_accepted() {
+        for v in ["1.2.2", "1.3.0", "2.0.0"] {
+            let verdict = evaluate_agent(v);
+            assert!(
+                matches!(verdict, AgentFidelity::Faithful(_)),
+                "agent {v} carries the fix and must record"
+            );
+            assert!(verdict.refusal().is_none());
+        }
+    }
+
+    #[test]
+    fn an_agent_that_reports_no_version_does_not_refuse() {
+        // 21 corpus sessions predate Control-Center reporting a version at all.
+        // Refusing them would turn a working setup into a hard failure.
+        for v in ["", "   ", "unknown"] {
+            let verdict = evaluate_agent(v);
+            assert!(matches!(verdict, AgentFidelity::Unknown(_)));
+            assert!(
+                verdict.refusal().is_none(),
+                "an unreadable agent version must not become a hard failure"
+            );
+        }
+    }
+
+    #[test]
+    fn the_agent_gate_is_not_capped_by_the_server_ceiling() {
+        // evaluate() refuses anything above SUPPORTED_MAX; the agent gate has no
+        // upper bound, because a newer agent cannot reintroduce an older defect.
+        // Getting this wrong would refuse every future release.
+        assert!(matches!(
+            evaluate_agent("9.9.9"),
+            AgentFidelity::Faithful(_)
+        ));
     }
 
     #[test]

@@ -21,6 +21,45 @@ nothing. It surfaced only as an empty trace.
 | `test_strict_refuses_to_reach_a_plaintext_server` | `strict` never downgrades |
 | `test_legacy_policy_sends_the_token_over_plaintext` | `legacy` is the explicit cleartext opt-in |
 | `test_http_address_still_reaches_a_tls_server` | an `http://` config still reaches an upgraded server |
+| `test_a_lossy_agent_is_refused_before_it_records_anything` | an agent below 1.2.2 is refused; the session is not left `active` |
+| `test_an_agent_at_the_fidelity_floor_is_not_refused` | 1.2.2+ is accepted, asserted on a *positive* log line |
+| `test_allow_unsupported_overrides_the_agent_gate` | the override records anyway, and still warns |
+
+## Why some cases need a real *agent*, not just a server
+
+The record-fidelity gate reads `agent_version`, and that field does not exist on
+the wire until an agent has registered — until then the server stamps an empty
+string on its heartbeats, which the gate correctly ignores. So every case that
+predates this section ran server-only and could not reach the gate at all. That
+is the gap the typed-command truncation shipped through.
+
+`stage-cc-releases.sh` therefore also lays down `control-center-agent`, which
+comes out of the archive it already downloads. Nothing actuates: the agent
+registers and idles, and the server emits a heartbeat carrying its version every
+five seconds, which is the whole input to the gate. That is what makes these
+runnable headless — the agent reads `DISPLAY` only when it executes a command,
+and a missing `xdotool` never stops it registering.
+
+A version counts as staged only when **both** binaries are present. Deciding on
+the server alone would leave a cache built before the agent was needed unable to
+ever acquire one, since re-running the script would skip it — which would make
+the three cases below quietly disappear from the run.
+
+Three traps worth knowing, each of which produced a passing-for-the-wrong-reason
+run while these were being written:
+
+- **`silence_timeout_seconds` must exceed the server's heartbeat interval.** The
+  harness pins 5s to keep the connect-only cases quick, and the server heartbeats
+  every 5s — so a test that needs to *receive* one races it and usually loses,
+  reporting a silence timeout instead. The fidelity cases raise it.
+- **Assert on a positive signal, not on the absence of the refusal.** "No refusal
+  was logged" is equally consistent with "no agent version ever reached the gate",
+  which is exactly what the timeout collision caused. ma-core logs an accepted
+  agent version for this reason.
+- **`memory-archive start` blocks until the session ends**, which is correct — a
+  healthy capture runs until it is stopped. Any case where the session is *not*
+  refused therefore has to use `cli_detached`, or it hangs until the harness
+  timeout and reports the feature working as a failure.
 
 ## Safety
 

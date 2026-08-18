@@ -25,7 +25,13 @@ from pathlib import Path
 
 import pytest
 
-from harness import CC_BIN_DIR, cc_server_binary, ma_core_binary, reset_registry
+from harness import (
+    CC_BIN_DIR,
+    cc_agent_binary,
+    cc_server_binary,
+    ma_core_binary,
+    reset_registry,
+)
 
 
 def strict_mode() -> bool:
@@ -117,6 +123,27 @@ def require_cc(version: str) -> Path:
         if strict_mode():
             # Staging is a workflow step in CI; a version missing there means the
             # download failed, which must not read as a passing matrix.
+            pytest.fail(message, pytrace=False)
+        pytest.skip(message)
+    return binary
+
+
+def require_cc_agent(version: str) -> Path:
+    """The agent binary for `version`, skipping when it is not staged.
+
+    Separate from `require_cc` because the two can legitimately diverge: the
+    archive did not always carry an agent, so a staged server is not a promise
+    of a staged agent. Under strict mode a missing agent is still a failure —
+    the release gate must not report green on a matrix that quietly dropped the
+    only tests covering record fidelity.
+    """
+    binary = cc_agent_binary(version)
+    if binary is None:
+        message = (
+            f"Control-Center agent {version} not staged — re-run "
+            f"stage-cc-releases.sh; see integration-tests/README.md"
+        )
+        if strict_mode():
             pytest.fail(message, pytrace=False)
         pytest.skip(message)
     return binary

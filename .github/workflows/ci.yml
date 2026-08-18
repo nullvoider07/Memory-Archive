@@ -103,9 +103,15 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # Opt-in: downloads three Control-Center release archives and takes several
-  # minutes, so it does not gate every push. Run it before cutting a release, or
-  # after any change to the capture stream.
+  # Opt-in: downloads every published Control-Center release archive and takes
+  # several minutes, so it does not gate every push. Run it before cutting a
+  # release, or after any change to the capture stream. Each archive supplies
+  # both a server and an agent; the record-fidelity cases need the agent, since
+  # `agent_version` does not exist on the wire until one registers.
+  #
+  # No xdotool here on purpose. The agent registers and idles without it, and
+  # nothing in this job actuates — a matrix that needed a display would not be
+  # runnable in CI at all.
   compatibility:
     name: Control-Center compatibility matrix
     runs-on: ubuntu-24.04

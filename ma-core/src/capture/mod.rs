@@ -2,6 +2,7 @@
 
 pub mod compat;
 pub mod disconnect;
+pub mod fidelity;
 pub mod session_state;
 pub mod stream;
 pub mod writer;
@@ -476,6 +477,12 @@ pub async fn run_watch_loop(args: WatchLoopArgs) {
 
                         let converted = crate::convert::to_human_readable(&event);
 
+                        // Advisory only: flags a recorded command that looks cut
+                        // short, without altering it or failing the step. The
+                        // version gate refuses agents with a *known* truncation
+                        // defect; this is what notices an unknown one.
+                        let suspect = crate::capture::fidelity::inspect(&event);
+
                         let step = match writer.write_event(&event, &converted) {
                             Ok(s) => s,
                             Err(e) => {
@@ -483,6 +490,24 @@ pub async fn run_watch_loop(args: WatchLoopArgs) {
                                 continue;
                             }
                         };
+
+                        // Logged after the write so it can name the step, which is
+                        // what makes it actionable. The command text is deliberately
+                        // not in the log line: a typed payload is whatever the agent
+                        // typed, up to and including a credential entered at a
+                        // prompt, and the log is a different artifact with a
+                        // different lifetime from the session directory — pasted
+                        // into issues, tailed on a screen this project is recording.
+                        // The record itself already carries the text, and the step
+                        // id says which record to open.
+                        if let Some(ref s) = suspect {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                step = step,
+                                check = %s.check,
+                                "Recorded command may be truncated — {}", s.note
+                            );
+                        }
                         crate::observability::metrics().steps_total.inc();
                         emit_file_written(&sync_tx, "commands/raw_input.md");
                         emit_file_written(&sync_tx, "commands/converted_input.md");
@@ -501,6 +526,7 @@ pub async fn run_watch_loop(args: WatchLoopArgs) {
                             after_image_path: None,
                             raw_command: event.raw_command.clone(),
                             converted_command: converted.clone(),
+                            record_suspect: suspect,
                         };
                         state.append_step(step_entry);
 

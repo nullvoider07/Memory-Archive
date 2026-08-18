@@ -190,6 +190,12 @@ pub struct StepEntry {
     pub raw_command: String,
     #[serde(default)]
     pub converted_command: String,
+    /// Set when the recorded command text carries a sign of having been cut
+    /// short — see [`crate::capture::fidelity`]. Advisory: the record itself is
+    /// never altered, and the step is never failed. Absent on every healthy
+    /// step, so existing sessions round-trip unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_suspect: Option<crate::capture::fidelity::RecordSuspect>,
 }
 
 /// Skipped image fetch record — failed commands produce no image.
@@ -333,4 +339,85 @@ pub fn read(memory_dir: &Path) -> anyhow::Result<SessionMetadata> {
 
     serde_json::from_str(&raw)
         .with_context(|| format!("Failed to parse metadata.json: {}", path.display()))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A step recorded before `record_suspect` existed must still load. Every
+    /// session already on disk is one of these, so a breaking change here would
+    /// be discovered by failing to read the corpus rather than by a test.
+    #[test]
+    fn a_step_without_the_suspect_field_still_loads() {
+        let json = r#"{
+            "step_id": 2,
+            "timestamp": "2026-07-22T08:09:41.000Z",
+            "action_type": "keyboard",
+            "action_subtype": "type",
+            "image_path": null,
+            "image_fetched": false,
+            "marked": false,
+            "raw_command": "Typed: printf \\",
+            "converted_command": "Type: printf \\"
+        }"#;
+
+        let step: StepEntry = serde_json::from_str(json).expect("must deserialize");
+        assert_eq!(step.step_id, 2);
+        assert!(step.record_suspect.is_none());
+    }
+
+    /// A healthy step must serialize byte-identically to how it did before the
+    /// field was added, or every existing session would show a spurious diff.
+    #[test]
+    fn a_healthy_step_writes_no_suspect_key() {
+        let step = StepEntry {
+            step_id: 1,
+            timestamp: "2026-08-18T00:00:00.000Z".to_string(),
+            action_type: "mouse".to_string(),
+            action_subtype: "left".to_string(),
+            image_path: None,
+            image_fetched: false,
+            marked: false,
+            before_image_path: None,
+            after_image_path: None,
+            raw_command: "Left-clicked at X=250, Y=386".to_string(),
+            converted_command: "Left-click at (250, 386)".to_string(),
+            record_suspect: None,
+        };
+
+        let out = serde_json::to_string(&step).expect("must serialize");
+        assert!(
+            !out.contains("record_suspect"),
+            "an absent suspicion must not appear in the record: {out}"
+        );
+    }
+
+    /// And when it does fire, it round-trips intact.
+    #[test]
+    fn a_flagged_step_round_trips() {
+        let step = StepEntry {
+            step_id: 2,
+            timestamp: "2026-08-18T00:00:00.000Z".to_string(),
+            action_type: "keyboard".to_string(),
+            action_subtype: "type".to_string(),
+            image_path: None,
+            image_fetched: false,
+            marked: false,
+            before_image_path: None,
+            after_image_path: None,
+            raw_command: "Typed: printf \\".to_string(),
+            converted_command: "Type: printf \\".to_string(),
+            record_suspect: crate::capture::fidelity::RecordSuspect {
+                check: "dangling-escape".to_string(),
+                note: "check the frames".to_string(),
+            }
+            .into(),
+        };
+
+        let out = serde_json::to_string(&step).expect("must serialize");
+        let back: StepEntry = serde_json::from_str(&out).expect("must deserialize");
+        assert_eq!(back.record_suspect, step.record_suspect);
+        // The flag is advisory and must never have edited the record it describes.
+        assert_eq!(back.raw_command, "Typed: printf \\");
+    }
 }

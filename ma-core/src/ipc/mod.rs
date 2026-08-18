@@ -1437,6 +1437,9 @@ async fn handle_message(
                         after_image_path: None,
                         raw_command: String::new(),
                         converted_command: String::new(),
+                        // Placeholder for a step with no metadata entry — there
+                        // is no recorded command to inspect.
+                        record_suspect: None,
                     }
                 }
             };

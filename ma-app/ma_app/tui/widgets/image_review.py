@@ -153,6 +153,17 @@ class ImageReview(Widget, can_focus=True):
         color: #3a3d4a;
         text-align: center;
     }
+
+    /* Hidden by default: only a step ma-core flagged ever shows this, so a
+       healthy session renders exactly as it did before the check existed. */
+    ImageReview > #record-suspect-banner {
+        display: none;
+        width: 100%;
+        padding: 0 1;
+        background: #4a3a00;
+        color: #ffd76e;
+        text-style: bold;
+    }
     """
 
     def __init__(
@@ -180,6 +191,11 @@ class ImageReview(Widget, can_focus=True):
             yield Button("Open fullscreen", id="open-btn")
 
         yield Label("No step selected.", id="no-step-label")
+
+        # Advisory banner for a step whose recorded command text looks cut
+        # short. Hidden unless ma-core flagged this step, so a healthy session
+        # looks exactly as it did before.
+        yield Label("", id="record-suspect-banner")
 
     def on_mount(self) -> None:
         self._update_display()
@@ -267,6 +283,8 @@ class ImageReview(Widget, can_focus=True):
     def _update_display(self) -> None:
         has_image = self._path is not None
 
+        self._update_suspect_banner()
+
         try:
             card     = self.query_one("#img-card",      Static)
             no_label = self.query_one("#no-step-label", Label)
@@ -339,6 +357,34 @@ class ImageReview(Widget, can_focus=True):
 
         except NoMatches:
             pass
+
+    def _update_suspect_banner(self) -> None:
+        """
+        Show ma-core's record-fidelity flag for the current step, if it set one.
+
+        The wording deliberately does not say the step failed. Both known
+        truncations actuated perfectly and left a correct artifact on disk — it
+        is only the stored copy of the command that is short, which is exactly
+        what makes it easy to annotate straight past.
+        """
+        try:
+            banner = self.query_one("#record-suspect-banner", Label)
+        except Exception:
+            return
+
+        suspect = getattr(self._step, "record_suspect", None) if self._step else None
+        if not isinstance(suspect, dict):
+            banner.display = False
+            banner.update("")
+            return
+
+        check = str(suspect.get("check") or "record-suspect")
+        banner.update(
+            f"⚠  RECORDED COMMAND MAY BE INCOMPLETE ({check}) — the keystrokes were "
+            f"delivered, but the stored text may be cut short. Check this step's frames "
+            f"before annotating, and do not edit the record without noting why."
+        )
+        banner.display = True
 
     def _set_label(self, widget_id: str, text: str) -> None:
         try:

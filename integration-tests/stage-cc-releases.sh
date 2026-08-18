@@ -42,7 +42,14 @@ printf '%s\n' "${VERSIONS[@]}" > "${DEST}/DISCOVERED"
 
 for version in "${VERSIONS[@]}"; do
     target="${DEST}/${version}/control-center-server"
-    if [[ -f "${target}" ]]; then
+    agent_target="${DEST}/${version}/control-center-agent"
+    # Both binaries, not just the server. A cache staged before the agent was
+    # needed holds a server and no agent, and skipping on the server alone would
+    # make re-running this script a no-op that can never repair it — the agent
+    # tests would keep skipping (or, under MA_INTEGRATION_STRICT, keep failing
+    # with an instruction that does nothing). NO_AGENT marks the versions whose
+    # archive genuinely carries no agent, so those are not re-downloaded forever.
+    if [[ -f "${target}" ]] && { [[ -f "${agent_target}" ]] || [[ -f "${DEST}/${version}/NO_AGENT" ]]; }; then
         echo "[skip] ${version} already staged"
         continue
     fi
@@ -76,6 +83,21 @@ for version in "${VERSIONS[@]}"; do
     tar -xzf "${tmp}/${archive}" -C "${tmp}"
     cp "${tmp}/bin/control-center-server" "${target}"
     chmod +x "${target}"
+
+    # The agent comes out of the same archive, so staging it costs no extra
+    # download. It is required to exercise the record-fidelity gate: the server
+    # stamps an empty agent_version on its heartbeats until an agent registers,
+    # so a server-only run cannot reach that code path at all. Absence is a warn
+    # rather than a failure — the tests that need it skip, and the archive did
+    # not always carry one.
+    if [[ -f "${tmp}/bin/control-center-agent" ]]; then
+        cp "${tmp}/bin/control-center-agent" "${agent_target}"
+        chmod +x "${agent_target}"
+    else
+        touch "${DEST}/${version}/NO_AGENT"
+        echo "[warn] ${version} archive carries no control-center-agent — agent-gate tests will skip"
+    fi
+
     rm -rf "${tmp}"
     echo "[ok] staged ${version}"
 done

@@ -49,6 +49,17 @@ def cc_server_binary(version: str) -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
+def cc_agent_binary(version: str) -> Optional[Path]:
+    """Return the agent binary for `version`, or None when it is not staged.
+
+    Staged from the same archive as the server, so a version has both or neither
+    — except for releases published before the archive carried an agent, which is
+    why this is a separate lookup rather than an assumption.
+    """
+    candidate = CC_BIN_DIR / version / "control-center-agent"
+    return candidate if candidate.is_file() else None
+
+
 def ma_core_binary() -> Optional[Path]:
     for profile in ("debug", "release"):
         candidate = REPO_ROOT / "target" / profile / "ma-core"
@@ -237,6 +248,89 @@ def cc_server(binary: Path, workdir: Path, tls_material: Optional[tuple[Path, Pa
 
 
 @dataclass
+class CcAgent:
+    log: Path
+
+
+@contextmanager
+def cc_agent(
+    binary: Path,
+    workdir: Path,
+    cc_port: int,
+    token: Optional[str] = None,
+    tls_ca: Optional[Path] = None,
+) -> Generator[CcAgent]:
+    """Attach a real Control-Center agent to a running server.
+
+    The agent is needed because `agent_version` only exists on the wire once one
+    is connected: with no agent the server stamps an empty string on its
+    heartbeats, which is exactly why a server-only test cannot exercise the
+    agent gate.
+
+    Nothing here actuates. The agent registers and then idles, and the server
+    emits a heartbeat carrying its version every five seconds — which is all the
+    gate reads. That is what makes this runnable headless: `control-center-agent`
+    reads `DISPLAY` only when it executes a command, and its startup probe for
+    `xdotool` is advisory — a missing one never stops it registering. (The probe
+    is `which xdotool` tested with `.output().is_ok()`, which is true whenever
+    `which` *ran*, so it does not even warn. Control-Center's business, noted
+    here only so this comment is not read as a promise that it would.)
+
+    Configuration is entirely by environment — the agent takes no arguments.
+    """
+    log = workdir / "cc-agent.log"
+
+    env = dict(os.environ)
+    env["AGENT_SERVER_HOST"] = "127.0.0.1"
+    env["AGENT_SERVER_PORT"] = str(cc_port)
+    env["HOME"] = str(workdir)
+    env["XDG_CONFIG_HOME"] = str(workdir / ".config")
+
+    # The agent logs through `tracing_subscriber::fmt::init()`, which filters to
+    # ERROR when RUST_LOG is unset — so a healthy agent writes nothing at all and
+    # the readiness line never appears. Without this the harness cannot tell
+    # "connected and idle" from "never started".
+    env["RUST_LOG"] = env.get("RUST_LOG") or "info"
+
+    # 1.1.0+ refuses to dial a plaintext server unless told to, and unlike
+    # ma-core it has no auto-downgrade: it exits with
+    # "TLS required: set AGENT_TLS_CA ... or AGENT_ALLOW_INSECURE".
+    if tls_ca:
+        env["AGENT_TLS_CA"] = str(tls_ca)
+        env.pop("AGENT_ALLOW_INSECURE", None)
+    else:
+        env["AGENT_ALLOW_INSECURE"] = "true"
+        env.pop("AGENT_TLS_CA", None)
+
+    if token:
+        env["CONTROL_CENTER_TOKEN"] = token
+    else:
+        env.pop("CONTROL_CENTER_TOKEN", None)
+
+    with log.open("wb") as fh:
+        proc = subprocess.Popen(
+            [str(binary)], stdout=fh, stderr=fh, env=env, start_new_session=True,
+        )
+    try:
+        # Registration, not the port: the agent dials out, so there is nothing to
+        # poll for. Without this the test races the agent and reads a heartbeat
+        # stamped with an empty version, which the gate correctly ignores — and
+        # the test would then pass for the wrong reason.
+        if not wait_for_file_line(log, "Ready to accept commands", timeout=30.0):
+            raise RuntimeError(
+                f"Control-Center agent did not register:\n"
+                f"{log.read_text(errors='replace')[-2000:]}"
+            )
+        yield CcAgent(log=log)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+@dataclass
 class MaCore:
     config_path: Path
     storage: Path
@@ -255,6 +349,7 @@ def ma_core(
     scheme: str = "http",
     max_version: str = "",
     allow_unsupported: bool = False,
+    silence_timeout: int = 5,
 ) -> Generator[MaCore]:
     """Run ma-core against an isolated config, storage tree and Redis DB."""
     binary = ma_core_binary()
@@ -286,7 +381,10 @@ def ma_core(
         "control_center_max_version": max_version,
         "control_center_allow_unsupported": allow_unsupported,
         "the_eyes_addr": "",
-        "silence_timeout_seconds": 5,
+        # 5s keeps the connect-only tests quick, but it is also exactly the
+        # server's WatchCommands heartbeat interval — so anything that needs to
+        # *receive* a heartbeat races it and usually loses. Those tests raise it.
+        "silence_timeout_seconds": silence_timeout,
     }, indent=2))
     config_path.chmod(0o600)
 
@@ -325,6 +423,32 @@ def cli(config_path: Path, *args: str, timeout: int = 90) -> subprocess.Complete
         ["memory-archive", *args],
         capture_output=True, text=True, env=env, timeout=timeout,
     )
+
+
+@contextmanager
+def cli_detached(config_path: Path, *args: str) -> Generator[subprocess.Popen]:
+    """Run a `memory-archive` command without waiting for it to finish.
+
+    `start` blocks until the session ends, which is correct: a healthy capture
+    runs until an operator stops it. Any test that watches a session *while it is
+    working* therefore cannot use `cli()` — it would block until the harness
+    timeout and report a failure that is really the feature behaving properly.
+    """
+    env = dict(os.environ)
+    env["MEMORY_ARCHIVE_CONFIG"] = str(config_path)
+    proc = subprocess.Popen(
+        ["memory-archive", *args],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=env, start_new_session=True,
+    )
+    try:
+        yield proc
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def register_session(config_path: Path, memory_name: str) -> str:

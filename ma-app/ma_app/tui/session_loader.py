@@ -49,6 +49,10 @@ class StepState:
     # are derived views and only fill these in when metadata carries nothing.
     raw_command: str = ""
     converted_command: str = ""
+    # Advisory flag written by ma-core when the recorded command text carries a
+    # sign of having been cut short. Never a reason to skip the step — the
+    # keystrokes were delivered; it is the stored copy that may be incomplete.
+    record_suspect: Optional[dict] = None
 
     # Set when this step was annotated (None if not yet done).
     timestamp_annotated: Optional[str] = None
@@ -327,6 +331,11 @@ class SessionLoader:
                     after_image_path=entry.get("after_image_path"),
                     raw_command=str(entry.get("raw_command") or ""),
                     converted_command=str(entry.get("converted_command") or ""),
+                    record_suspect=(
+                        entry.get("record_suspect")
+                        if isinstance(entry.get("record_suspect"), dict)
+                        else None
+                    ),
                 ))
             except (KeyError, TypeError, ValueError) as e:
                 raise LoadError(

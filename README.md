@@ -6,11 +6,15 @@
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#platform-compatibility)
 
-**Version:** 0.4.1  
+**Version:** 0.4.2  
 **Last Updated:** August 2026  
 **Developer:** Kartik (NullVoider)
 
-> **✨ What's new in 0.4.1** — editor fixes found while annotating. No wire, storage or CLI change; a session recorded or annotated by 0.4.0 is read identically.
+> **✨ What's new in 0.4.2** — record fidelity. The recorder no longer trusts an agent known to misreport what it typed, and says so when a stored command looks cut short. No wire, storage or CLI change; a session recorded by 0.4.1 is read identically.
+> - **The Control-Center *agent* version is now gated, not just the server's.** Below 1.2.2 the agent rebuilt its report of a typed command by scanning for a closing quote, so anything typed with a quote in it was stored truncated there. The keystrokes actuated correctly and the artifact on disk was byte-exact — only the record was damaged, which is exactly what let it survive: every self-reporting signal said success. One corpus session carried the damage and it was found a month later while annotating, not at capture. The existing gate could not have caught it — it reads `GetServerIdentity` at connect and the defect is in the agent, so a current server fronting an old agent passed, and the server/agent comparison only warned when the two *differed*. A matched 1.0.0 pair went through in silence. A second floor, `RECORD_FIDELITY_MIN` (1.2.2), is checked against the agent version and refuses the session; `control_center_allow_unsupported` overrides it. It is deliberately not a raise of the connect floor: 1.0.0 connects and actuates fine, and collapsing "can we drive it" into "can we trust what it says" is what let this through. The check reads the first event carrying a version — including the heartbeat an idle agent sends every five seconds — so it normally refuses before a single step has been written.
+> - **A recorded command that looks cut short is flagged in `metadata.json` and shown while annotating.** The version gate closes a known defect in a known release; this notices an unknown one. A `record_suspect` object on the step names which check fired and what to do about it, and the annotation pane shows a banner. It is advisory throughout: it never alters the recorded command, never fails a step, and never reaches `reasoning.jsonl` or the compiled `memory.md` — repairing a damaged record is a person's job, done from the frames and stamped with its provenance, because a guess written by the recorder would be indistinguishable from a reading. The signal is the shape the known truncations actually left, and the discriminator against a Windows path ending in `\` is what precedes it: whitespace means a cut, a word character means a path separator. Across all 164 typed payloads in the recorded corpus it flags none of them, and it flags all three known truncations.
+> - **The compatibility matrix now drives a real agent.** Every case before this ran server-only, and `agent_version` does not exist on the wire until an agent registers — the server stamps an empty string on its heartbeats until then. So the matrix could not reach the fidelity gate at all, which is the gap that let the truncation ship. The staging script now lays down `control-center-agent` from the same archive it already downloads, and three cases cover the refusal, the accepted path and the override. Two harness bugs surfaced immediately: the pinned 5s silence timeout exactly equalled the server's heartbeat interval, so a test that needed to *receive* a heartbeat raced it and lost; and the accepted path had no log line of its own, so asserting on the absence of a refusal would have passed even when no version ever reached the gate.
+> Earlier in 0.4.1 — editor fixes found while annotating:
 > - **Pasting over selected text replaces it.** `Ctrl+A` then `Ctrl+V` in the reasoning editor left the selection in place and inserted the clipboard immediately after it, with no separator — the opposite of what select-all-and-paste means everywhere else, and the exact operation an annotator performs to replace a draft. The override inserted at the cursor rather than replacing the selection range, and after select-all the cursor sits at the end of the document. A right-to-left drag selection is handled, an empty selection still inserts at the cursor, and the cursor now follows the pasted text.
 > - **The compile editor reaches the system clipboard.** It had no paste binding of its own, so `Ctrl+V` fell through to Textual's, which reads the in-app clipboard and nothing else: text copied anywhere outside the TUI had nowhere to land in `memory.md`, the document the compile step exists to produce. Both editors now share one paste path, so the source and the selection-replacement semantics cannot drift apart again. `Ctrl+A` also means select-all in both — `TextArea` binds it to cursor-to-line-start, which only the reasoning editor had overridden.
 > - **Cut, undo and redo work when the reasoning editor is reached by `Tab`.** The outer editor widget is focusable in its own right, and only keys bound on it reach the inner text area in that state. `Ctrl+A`, `Ctrl+C` and `Ctrl+V` were bound there; `Ctrl+X`, `Ctrl+Z` and `Ctrl+Y` were not — while the widget's own documentation listed all of them as working regardless of which half held focus.
@@ -214,7 +218,9 @@ Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) an
 - Write `raw_input.md`, `converted_input.md`, `actuation_commands.json`, `cc_commands.json` atomically per step
 - Mark failed commands with `[FAILED]` prefix in `raw_input.md`
 - Detect tool silence beyond configurable timeout and trigger graceful disconnect
-- Filter Control-Center heartbeat-only messages from the command stream
+- Filter Control-Center heartbeat-only messages from the command stream (after reading the agent version they carry)
+- Refuse to record against a Control-Center **agent** below the record-fidelity floor (1.2.2), which stores typed commands truncated at the first quote
+- Flag a recorded command that carries a truncation signature into `record_suspect` on the step, without altering it or failing the step
 - Track Kafka partition and offset per session for crash recovery
 
 **Image capture:**
@@ -319,6 +325,8 @@ Memory Archive ships with a one-line installer for Linux/macOS (`install.sh`) an
 **Multi-Cloud Storage with Routing.** `StorageRouter` selects a named backend at session registration time by evaluating routing rules against session attributes (tenant prefix, region tag, mode). The backend name is stored in the Redis session hash and is never re-evaluated. Each named backend (`LocalBackend`, `S3Backend`, `AzureBackend`, `GcpBackend`) implements the `StorageBackend` trait and handles its own credential resolution, integrity verification, and retry logic. In local mode, `SyncWorker` runs as a background thread, dequeuing `FileWritten` events and uploading to cloud with exponential backoff. Permanent upload failures fire an ERROR webhook alert. Cloud session read-back for annotation (fetching a session from cloud to a temp dir) is handled by `RemoteFetcher` for remote annotators and `fetch_session_if_missing` for local annotation.
 
 **VLM Reasoning Pipeline.** In automated mode, `ma-core` emits a `StepReadyForReasoning` IPC push event per step. `ma-app`'s `ReasoningPipeline` receives the push, applies the session's routing policy via `ModelRouter`, and dispatches the request to the selected `ModelBackend` — either `GenericApiModelBackend` (any OpenAI-compatible endpoint) or `InternalModelBackend` (Proprietary VLM). Rate limiting is applied via a sliding-window `RateLimiter` across both `requests_per_minute` and `token_budget_per_hour`. The per-session circuit breaker in `ReasoningPipeline` counts non-retryable failures; at the threshold, it opens, all subsequent requests for that session return `model_degraded`, and after `circuit_breaker_reset_seconds`, a single half-open trial request is sent. If the trial succeeds, the circuit closes. On `ReasoningResult` return, `ma-core` writes the reasoning to `reasoning.jsonl`, updates `metadata.json` token counts, and advances the session.
+
+**Record Fidelity Gate.** Two independent defences against a trace that looks complete and is not. First, `capture/compat.rs` carries a second version floor, `RECORD_FIDELITY_MIN` (1.2.2), evaluated against the Control-Center **agent** version rather than the server's: below it the agent reverse-engineered its own report of a typed command by scanning for a closing quote, so a command containing one was stored cut at that point while actuating perfectly. The agent version is not available at connect — `GetServerIdentity` describes the server and `ConnectionMetadata` carries no agent field — so it is read from the first event bearing one, including the heartbeat an idle agent produces every five seconds; the refusal therefore normally lands before any step is written. `control_center_allow_unsupported` overrides it, and still logs. Second, `capture/fidelity.rs` inspects every typed payload for the shape a cut leaves — a trailing lone backslash, or an odd number of unescaped quotes — and attaches a `record_suspect` object to the step in `metadata.json`, surfaced as a banner in the annotation pane. It is advisory by construction: it never rewrites the recorded command, never fails a step or a session, and never propagates into `reasoning.jsonl` or the compiled `memory.md`, because repairing a damaged record is a human judgement made from the frames and a guess written by the recorder would be indistinguishable from a reading.
 
 **Human Annotation TUI.** `AnnotationApp` is a Textual-based terminal application providing a two-pane interface: a virtual-scrolling `StepList` on the left (with step status icons and accordion expansion) and an image preview pane on the right. The `ReasoningEditor` widget supports multi-line input, word counting, undo/redo with Ctrl+Z/Y, clipboard, and autosave every 2.5 seconds. `SessionLoader` reads all existing `reasoning.jsonl` entries and `metadata.json` on open, pre-populating the step list; `metadata.json` is authoritative for every step's raw and converted command, and the files under `commands/` are consulted only to fill a value metadata does not carry. Nothing else parses them — the step list renders `StepState` and reads it at render time, so a row cannot display a value the loader has since resolved differently. `ReasoningWriter` performs atomic upserts to `reasoning.jsonl`. After all steps are annotated, `AnnotationComplete` overlay offers to launch `CompilerApp` immediately. `CompilerApp` is a full-screen terminal text editor with autosave, a `CompilerStatusBar` showing word count and save state, and a quit overlay. On save, it calls `FinalizeMemory` IPC, setting session status to `complete`.
 
@@ -990,7 +998,7 @@ Check `ma-core` connectivity. Sends a `Ping` IPC message and prints the `ma-core
 
 ```bash
 memory-archive ping
-# → ma-core v0.4.1 — OK
+# → ma-core v0.4.2 — OK
 ```
 
 ---
@@ -1489,7 +1497,7 @@ When `memory-archive annotator claim` is used (remote mode), the TUI starts a da
 | `control_center_tls_ca` | `--control-center-tls-ca` | PEM CA that signed the CC server certificate; empty uses the system trust store | both | — |
 | `control_center_security` | `--control-center-security` | Transport policy: `auto` (TLS, fall back to plaintext with a warning) / `strict` (TLS only) / `legacy` (plaintext only) | both | `auto` |
 | `control_center_max_version` | `--control-center-max-version` | Accept CC up to this `x.y.z`, above the built-in ceiling. **Only ever raises** — it cannot narrow the supported range | both | — |
-| `control_center_allow_unsupported` | `--control-center-allow-unsupported` | Record against a CC version outside the supported range. Output is unverified; the refusal is logged on every connect | both | `false` |
+| `control_center_allow_unsupported` | `--control-center-allow-unsupported` | Record against a CC version outside the supported range, **or against an agent below the record-fidelity floor**. Output is unverified; the refusal is logged on every connect | both | `false` |
 | `the_eyes_addr` | `--the-eyes-addr` | The-Eyes HTTP global fallback address | both | — |
 | `the_eyes_poll_interval_seconds` | `--the-eyes-poll-interval` | The-Eyes liveness poll interval (seconds) | both | `10` |
 | `silence_timeout_seconds` | `--silence-timeout` | CC silence before graceful disconnect (seconds) | both | `30` |
@@ -1535,8 +1543,23 @@ Memory Archive supports **Control-Center 1.0.0 through 1.3.0** from a single con
 | `CommandEvent` wire format | identical | identical | identical | identical | identical | identical |
 | `position_captured` meaning | best-effort readback | best-effort readback | **verified, or `false`** | **verified, or `false`** | **verified, or `false`** | **verified, or `false`** |
 | Windows drag position reports | origin | origin | origin | origin | origin | **destination** |
+| Typed command **recorded** faithfully | truncated at the first quote | truncated | truncated | truncated | **faithful** | **faithful** |
 
 Every row above is verified against real release binaries by the compatibility suite in `integration-tests/`, which discovers releases from the GitHub API rather than a written-down list.
+
+**The last row is a refusal, not a caveat.** Below **1.2.2** the Control-Center
+*agent* rebuilt its own report of a typed command by scanning for a closing
+quote, so a command containing one was stored cut at that quote — while the
+keystrokes actuated correctly and the artifact on disk was byte-exact. Memory
+Archive refuses to record against such an agent rather than write a trace that
+looks complete and is not; `control_center_allow_unsupported` overrides it.
+
+Note that this floor is checked against the **agent** version, which is a
+different number from the server's and arrives later. Nothing at connect carries
+it — `GetServerIdentity` reports the server and `ConnectionMetadata` has no agent
+version field — so it is read from the first event, including the heartbeat an
+idle agent produces every five seconds. In practice the refusal lands before a
+single step is written.
 
 **Configure once, works everywhere:**
 
